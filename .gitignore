@@ -3,8 +3,6 @@ result
 result-*
 *.img
 
-# Local overrides
-local.nix
 
 # Misc
 *.swp
