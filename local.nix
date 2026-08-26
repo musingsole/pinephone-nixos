@@ -2,6 +2,65 @@
 
 let
   defaultUser = "pine";
+
+  chromiumMobile = pkgs.runCommand "chromium-mobile" {
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+  } ''
+    mkdir -p $out/bin $out/share/applications $out/share/icons
+
+    # Install full Chromium icon theme so Phosh can display the application logo
+    if [ -d "${pkgs.chromium}/share/icons" ]; then
+      cp -r ${pkgs.chromium}/share/icons/* $out/share/icons/
+    fi
+
+    # Launcher wrapper with mobile Wayland Ozone flags & mobile User-Agent
+    makeWrapper ${pkgs.chromium}/bin/chromium $out/bin/chromium \
+      --add-flags "--ozone-platform=wayland" \
+      --add-flags "--enable-features=UseOzonePlatform" \
+      --add-flags "--user-agent=\"Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36\""
+
+    # Desktop entry targeting mobile form factors and Wayland WM class
+    cat > $out/share/applications/chromium.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Chromium Web Browser
+GenericName=Web Browser
+Comment=Access the Internet
+Exec=chromium %U
+Icon=chromium
+Terminal=false
+StartupWMClass=chromium-browser
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+X-Purism-FormFactor=Workstation;Mobile;
+EOF
+
+    ln -s chromium.desktop $out/share/applications/chromium-browser.desktop
+  '';
+
+  scaleToFitUtil = pkgs.writeShellScriptBin "scale-to-fit" ''
+    APP="$1"
+    ACTION="''${2:-on}"
+
+    if [ -z "$APP" ]; then
+      echo "Usage: scale-to-fit <app-id> [on|off]"
+      echo "Example: scale-to-fit chromium on"
+      exit 1
+    fi
+
+    APP_PATH="''${APP//./-}"
+
+    if [ "$ACTION" = "off" ] || [ "$ACTION" = "false" ]; then
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP"/ scale-to-fit false 2>/dev/null || true
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP_PATH"/ scale-to-fit false 2>/dev/null || true
+      echo "Scale-to-fit disabled for $APP"
+    else
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP"/ scale-to-fit true 2>/dev/null || true
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP_PATH"/ scale-to-fit true 2>/dev/null || true
+      echo "Scale-to-fit enabled for $APP"
+    fi
+  '';
 in
 {
   imports = [
@@ -39,6 +98,10 @@ in
       "dialout"
       "seat"
       "tty"
+    ];
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE/BuDgBr/8UNugbE+XpWcrPGPsDH4LZwbiiguvCI0ot remagic@harmony"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGjyB1hrun7glFf5FkG3wlB06yywnhUSbR+Ztpt+eFij nixos@h4x0r"
     ];
   };
 
@@ -187,6 +250,22 @@ in
           "sm/puri/phosh/osk" = {
             enabled = true;
           };
+          "sm/puri/phoc" = {
+            auto-maximize = true;
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/chromium" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/chromium-browser" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/org-chromium-Chromium" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/org.chromium.Chromium" = {
+            scale-to-fit = true;
+          };
           "mobi/phosh/osk" = {
             enabled = true;
           };
@@ -194,9 +273,28 @@ in
       }
     ];
   };
-  environment.pathsToLink = [ "/share/gsettings-schemas" ];
+  # ---------------------------------------------------------------------------
+  # Sound & Audio (PipeWire, WirePlumber, ALSA & PulseAudio Compatibility)
+  # ---------------------------------------------------------------------------
+  security.rtkit.enable = true;
+  services.pipewire = {
+    enable = true;
+    alsa.enable = true;
+    alsa.support32Bit = true;
+    pulse.enable = true;
+  };
+  services.pulseaudio.enable = false;
+
+  environment.gnome.excludePackages = with pkgs; [
+    epiphany
+  ];
 
   environment.systemPackages = with pkgs; [
+    alsa-utils
+    wireplumber
+    pulseaudio
+    chromiumMobile
+    scaleToFitUtil
     (pkgs.runCommandCC "send-key-esc" { } ''
       mkdir -p $out/bin
       $CC -O2 -x c - -o $out/bin/send-key-esc << 'EOF'
@@ -238,11 +336,90 @@ int main() {
 EOF
     '')
   ];
-
   # ---------------------------------------------------------------------------
-  # Hardware Graphics (Mesa / Panfrost GPU drivers for Wayland/Phosh)
+  # Hardware Graphics & Bluetooth (Mesa / Panfrost GPU & AP6255 Broadcom BT)
   # ---------------------------------------------------------------------------
   hardware.graphics.enable = lib.mkDefault true;
+  hardware.bluetooth = {
+    enable = true;
+    powerOnBoot = true;
+    settings = {
+      General = {
+        Experimental = true;
+      };
+    };
+  };
+  hardware.enableRedistributableFirmware = true;
+  hardware.firmware = with pkgs; [ linux-firmware ];
+
+  environment.etc."pinephone-bluetooth-setup.sh" = {
+    mode = "0755";
+    text = ''
+      #!/bin/sh
+      chmod 666 /dev/rfkill 2>/dev/null || true
+      for i in $(seq 1 10); do
+        if [ -d /sys/class/bluetooth/hci0 ]; then
+          break
+        fi
+        sleep 1
+      done
+
+      rfkill unblock bluetooth 2>/dev/null || true
+      ADDR=$(hciconfig hci0 2>/dev/null | grep "BD Address" | awk '{print $3}' || true)
+      if [ "$ADDR" = "AA:AA:AA:AA:AA:AA" ] || [ -z "$ADDR" ]; then
+        MAC="02:45:67:$(printf '%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
+        hciconfig hci0 down 2>/dev/null || true
+        btmgmt -i hci0 public-addr "$MAC" 2>/dev/null || true
+        hciconfig hci0 up 2>/dev/null || true
+        systemctl restart bluetooth 2>/dev/null || true
+        sleep 1
+      fi
+      bluetoothctl power on 2>/dev/null || true
+      bluetoothctl discoverable on 2>/dev/null || true
+      bluetoothctl pairable on 2>/dev/null || true
+    '';
+  };
+
+  systemd.services.pinephone-bluetooth-setup = {
+    description = "Initialize PinePhone Pro Bluetooth & RFKill Permissions";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "bluetooth.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "/etc/pinephone-bluetooth-setup.sh";
+    };
+  };
+
+  environment.etc."pinephone-audio-setup.sh" = {
+    mode = "0755";
+    text = ''
+      #!/bin/sh
+      if ! grep -q "PinePhonePro" /proc/asound/cards 2>/dev/null; then
+        echo 1-001c > /sys/bus/i2c/drivers_probe 2>/dev/null || true
+        sleep 1
+      fi
+
+      amixer -c PinePhonePro sset "SPOL MIX SPKVOL L" on 2>/dev/null || true
+      amixer -c PinePhonePro sset "SPOR MIX SPKVOL R" on 2>/dev/null || true
+      amixer -c PinePhonePro sset "Speaker Channel" on 2>/dev/null || true
+      amixer -c PinePhonePro sset "Speaker L" on 2>/dev/null || true
+      amixer -c PinePhonePro sset "Speaker R" on 2>/dev/null || true
+      amixer -c PinePhonePro sset "Speaker" 100% 2>/dev/null || true
+      amixer -c PinePhonePro sset "Internal Speaker" on 2>/dev/null || true
+      alsactl store 2>/dev/null || true
+    '';
+  };
+
+  systemd.services.pinephone-audio-setup = {
+    description = "Initialize PinePhone Pro Audio Codec & ALSA Mixer Switches";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "/etc/pinephone-audio-setup.sh";
+    };
+  };
 
   # ---------------------------------------------------------------------------
   # Networking, mDNS (pinephone-pro.local) & SSH Access
@@ -272,9 +449,12 @@ EOF
     fi
   '';
 
-  # Disable modem manager & calls temporarily during initial setup to avoid serial/modem hardware lockups
-  services.eg25-manager.enable = lib.mkForce false;
-  programs.calls.enable = lib.mkForce false;
+  # Enable Bluetooth Blueman Manager and Modem (eg25-manager & calls) for PinePhone Pro
+  services.blueman.enable = true;
+
+  services.eg25-manager.enable = true;
+  programs.calls.enable = true;
+  networking.modemmanager.enable = true;
 
   # Pre-configured WiFi connection so SSH is available on first boot
   environment.etc."NetworkManager/system-connections/noobiemcfoob.nmconnection" = {
@@ -363,6 +543,8 @@ EOF
           "-Dgtk_doc=false"
         ];
       });
+
+      epiphany = super.emptyDirectory;
     })
   ];
 }

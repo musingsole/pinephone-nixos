@@ -13,6 +13,65 @@ Mobile NixOS includes `./local.nix` automatically during evaluation. Our updated
 
 let
   defaultUser = "pine";
+
+  chromiumMobile = pkgs.runCommand "chromium-mobile" {
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+  } ''
+    mkdir -p $out/bin $out/share/applications $out/share/icons
+
+    # Install full Chromium icon theme so Phosh can display the application logo
+    if [ -d "${pkgs.chromium}/share/icons" ]; then
+      cp -r ${pkgs.chromium}/share/icons/* $out/share/icons/
+    fi
+
+    # Launcher wrapper with mobile Wayland Ozone flags & mobile User-Agent
+    makeWrapper ${pkgs.chromium}/bin/chromium $out/bin/chromium \
+      --add-flags "--ozone-platform=wayland" \
+      --add-flags "--enable-features=UseOzonePlatform" \
+      --add-flags "--user-agent=\"Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36\""
+
+    # Desktop entry targeting mobile form factors and Wayland WM class
+    cat > $out/share/applications/chromium.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Chromium Web Browser
+GenericName=Web Browser
+Comment=Access the Internet
+Exec=chromium %U
+Icon=chromium
+Terminal=false
+StartupWMClass=chromium-browser
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+X-Purism-FormFactor=Workstation;Mobile;
+EOF
+
+    ln -s chromium.desktop $out/share/applications/chromium-browser.desktop
+  '';
+
+  scaleToFitUtil = pkgs.writeShellScriptBin "scale-to-fit" ''
+    APP="$1"
+    ACTION="''${2:-on}"
+
+    if [ -z "$APP" ]; then
+      echo "Usage: scale-to-fit <app-id> [on|off]"
+      echo "Example: scale-to-fit chromium on"
+      exit 1
+    fi
+
+    APP_PATH="''${APP//./-}"
+
+    if [ "$ACTION" = "off" ] || [ "$ACTION" = "false" ]; then
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP"/ scale-to-fit false 2>/dev/null || true
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP_PATH"/ scale-to-fit false 2>/dev/null || true
+      echo "Scale-to-fit disabled for $APP"
+    else
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP"/ scale-to-fit true 2>/dev/null || true
+      ${pkgs.glib}/bin/gsettings set sm.puri.phoc.application:/sm/puri/phoc/application/"$APP_PATH"/ scale-to-fit true 2>/dev/null || true
+      echo "Scale-to-fit enabled for $APP"
+    fi
+  '';
 in
 {
   imports = [
@@ -20,10 +79,11 @@ in
   ];
 
   # ---------------------------------------------------------------------------
-  # System Identity
+  # System Identity & Nix Settings
   # ---------------------------------------------------------------------------
   networking.hostName = "pinephone-pro";
   system.stateVersion = "26.11";
+  nix.settings.trusted-users = [ "root" defaultUser "@wheel" ];
 
   # ---------------------------------------------------------------------------
   # Phosh Desktop Session User
@@ -139,11 +199,38 @@ in
           "mobi/phosh/osk" = {
             enabled = true;
           };
+          "sm/puri/phoc" = {
+            auto-maximize = true;
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/chromium" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/chromium-browser" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/org-chromium-Chromium" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/org.chromium.Chromium" = {
+            scale-to-fit = true;
+          };
         };
       }
     ];
   };
   environment.pathsToLink = [ "/share/gsettings-schemas" ];
+
+  # ---------------------------------------------------------------------------
+  # System Packages
+  # ---------------------------------------------------------------------------
+  environment.systemPackages = with pkgs; [
+    alsa-utils
+    wireplumber
+    pulseaudio
+    chromiumMobile
+    scaleToFitUtil
+  ];
 
   # ---------------------------------------------------------------------------
   # Hardware Graphics (Mesa / Panfrost GPU drivers for Wayland/Phosh)
@@ -219,7 +306,31 @@ in
 
 ---
 
-## 2. Building the Image
+## 2. Managing Scale-to-Fit (`scale-to-fit` utility)
+
+Phoc (the Wayland compositor used by Phosh) manages window fitting for applications that exceed the narrow mobile viewport (e.g. Chromium's ~500px minimum desktop window width on a 360px portrait screen).
+
+A CLI helper script `scale-to-fit` is installed on the system:
+
+- **Enable scaling for an app**:
+  ```bash
+  scale-to-fit chromium on
+  # or
+  scale-to-fit <app-id> on
+  ```
+- **Disable scaling for an app**:
+  ```bash
+  scale-to-fit chromium off
+  ```
+
+Under the hood, this sets the GSettings schema path:
+`sm.puri.phoc.application:/sm/puri/phoc/application/<app-id>/ scale-to-fit true|false`
+
+*(Note: Phoc queries `/sm/puri/phoc/application/` [singular]. Do not use `/applications/` [plural].)*
+
+---
+
+## 3. Building the Image
 
 ### Method A: Build root `local.nix` (Recommended)
 
@@ -237,7 +348,7 @@ nix-build examples/phosh --argstr device pine64-pinephonepro --argstr system aar
 
 ---
 
-## 3. Syncing to Remote Builder (`nixos@h4x0r.local`)
+## 4. Syncing to Remote Builder (`nixos@h4x0r.local`)
 
 ```bash
 rsync -avz --exclude='.git' /home/musengdir/mobile-nixos/ nixos@h4x0r.local:~/mobile-nixos/
