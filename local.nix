@@ -61,6 +61,121 @@ EOF
       echo "Scale-to-fit enabled for $APP"
     fi
   '';
+
+  audioSwitchUtil = pkgs.writeShellScriptBin "audio-switch" ''
+    CMD="''${1:-status}"
+
+    get_sink_id() {
+      PATTERN="$1"
+      ${pkgs.wireplumber}/bin/wpctl status 2>/dev/null | \
+        sed -n '/Sinks:/,/Sources:/p' | \
+        grep -iE "$PATTERN" | \
+        head -n 1 | \
+        grep -oE '[0-9]+\.' | \
+        head -n 1 | \
+        tr -d '.'
+    }
+
+    get_source_id() {
+      PATTERN="$1"
+      ${pkgs.wireplumber}/bin/wpctl status 2>/dev/null | \
+        sed -n '/Sources:/,/Filters:/p' | \
+        grep -iE "$PATTERN" | \
+        head -n 1 | \
+        grep -oE '[0-9]+\.' | \
+        head -n 1 | \
+        tr -d '.'
+    }
+
+    case "$CMD" in
+      status|list|"")
+        echo "=== Audio Devices & Current Routing ==="
+        ${pkgs.wireplumber}/bin/wpctl status
+        ;;
+
+      speaker|spk|internal)
+        ID=$(get_sink_id "Speaker|Built-in")
+        if [ -n "$ID" ]; then
+          ${pkgs.wireplumber}/bin/wpctl set-default "$ID"
+          echo "Default output switched to Internal Speaker (ID: $ID)"
+        else
+          echo "Error: Internal speaker sink not found."
+          exit 1
+        fi
+        ;;
+
+      bluetooth|bt|headphones|headset)
+        ID=$(get_sink_id "bluez|headphone|headset|wireless|shokz")
+        if [ -n "$ID" ]; then
+          ${pkgs.wireplumber}/bin/wpctl set-default "$ID"
+          echo "Default output switched to Bluetooth Audio (ID: $ID)"
+        else
+          echo "Error: No Bluetooth audio output device found. Make sure headphones are connected."
+          exit 1
+        fi
+        ;;
+
+      mic-internal|mic-builtin)
+        ID=$(get_source_id "Internal Microphone|Built-in.*Microphone|Mic")
+        if [ -n "$ID" ]; then
+          ${pkgs.wireplumber}/bin/wpctl set-default "$ID"
+          echo "Default input switched to Internal Microphone (ID: $ID)"
+        else
+          echo "Error: Internal microphone not found."
+          exit 1
+        fi
+        ;;
+
+      mic-bt|mic-headset)
+        ID=$(get_source_id "bluez|headset|wireless|shokz")
+        if [ -n "$ID" ]; then
+          ${pkgs.wireplumber}/bin/wpctl set-default "$ID"
+          echo "Default input switched to Bluetooth Microphone (ID: $ID)"
+        else
+          echo "Error: Bluetooth microphone not found."
+          exit 1
+        fi
+        ;;
+
+      set)
+        TARGET="$2"
+        if [ -z "$TARGET" ]; then
+          echo "Usage: audio-switch set <id>"
+          exit 1
+        fi
+        ${pkgs.wireplumber}/bin/wpctl set-default "$TARGET"
+        echo "Default device set to $TARGET"
+        ;;
+
+      vol)
+        LEVEL="''${2:-50%}"
+        TARGET="''${3:-@DEFAULT_AUDIO_SINK@}"
+        ${pkgs.wireplumber}/bin/wpctl set-volume "$TARGET" "$LEVEL"
+        echo "Volume set to $LEVEL on $TARGET"
+        ;;
+
+      mute)
+        TARGET="''${2:-@DEFAULT_AUDIO_SINK@}"
+        ${pkgs.wireplumber}/bin/wpctl set-mute "$TARGET" toggle
+        echo "Toggled mute on $TARGET"
+        ;;
+
+      *)
+        echo "Usage: audio-switch [status|speaker|bluetooth|mic-internal|mic-bt|set <id>|vol <level>|mute]"
+        echo ""
+        echo "Commands:"
+        echo "  status         - Show current audio devices and routing"
+        echo "  speaker        - Switch audio output to internal speaker"
+        echo "  bluetooth      - Switch audio output to connected Bluetooth headphones"
+        echo "  mic-internal   - Switch audio input to internal microphone"
+        echo "  mic-bt         - Switch audio input to Bluetooth headset microphone"
+        echo "  set <id>       - Set default sink/source by numeric ID"
+        echo "  vol <level>    - Set volume (e.g. 80%, 0.5, 100%+)"
+        echo "  mute           - Toggle mute on default sink"
+        exit 1
+        ;;
+    esac
+  '';
 in
 {
   imports = [
@@ -266,6 +381,15 @@ in
           "sm/puri/phoc/application/org.chromium.Chromium" = {
             scale-to-fit = true;
           };
+          "sm/puri/phoc/application/pavucontrol" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/org-pulseaudio-pavucontrol" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/gnome-control-center" = {
+            scale-to-fit = true;
+          };
           "mobi/phosh/osk" = {
             enabled = true;
           };
@@ -282,6 +406,15 @@ in
     alsa.enable = true;
     alsa.support32Bit = true;
     pulse.enable = true;
+    wireplumber.extraConfig = {
+      "50-disable-seat-monitoring" = {
+        "wireplumber.profiles" = {
+          main = {
+            "monitor.bluez.seat-monitoring" = "disabled";
+          };
+        };
+      };
+    };
   };
   services.pulseaudio.enable = false;
 
@@ -293,6 +426,8 @@ in
     alsa-utils
     wireplumber
     pulseaudio
+    pavucontrol
+    audioSwitchUtil
     chromiumMobile
     scaleToFitUtil
     (pkgs.runCommandCC "send-key-esc" { } ''
@@ -346,6 +481,9 @@ EOF
     settings = {
       General = {
         Experimental = true;
+        AutoEnable = true;
+        MultiProfile = "multiple";
+        FastConnectable = true;
       };
     };
   };
