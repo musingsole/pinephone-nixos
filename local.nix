@@ -176,6 +176,70 @@ EOF
         ;;
     esac
   '';
+
+  torchUtil = pkgs.runCommandCC "torch" { } ''
+    mkdir -p $out/bin
+    $CC -O2 -x c - -o $out/bin/torch << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+
+int main(int argc, char **argv) {
+    int fd = open("/dev/v4l-subdev11", O_RDWR);
+    if (fd < 0) { perror("open /dev/v4l-subdev11"); return 1; }
+    struct v4l2_control ctrl = { .id = 0x009c0901 };
+    if (ioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+        ctrl.value = 0;
+    }
+    int target = 0;
+    if (argc < 2 || strcmp(argv[1], "toggle") == 0) {
+        target = (ctrl.value == 2) ? 0 : 2;
+    } else if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
+        target = 2;
+    } else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
+        target = 0;
+    } else if (strcmp(argv[1], "status") == 0) {
+        printf("%s\n", (ctrl.value == 2) ? "on" : "off");
+        close(fd);
+        return 0;
+    } else {
+        fprintf(stderr, "Usage: torch [on|off|toggle|status]\n");
+        close(fd);
+        return 1;
+    }
+    ctrl.value = target;
+    if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0) {
+        perror("VIDIOC_S_CTRL");
+        close(fd);
+        return 1;
+    }
+    printf("Flashlight %s\n", (target == 2) ? "ON" : "OFF");
+    close(fd);
+    return 0;
+}
+EOF
+  '';
+
+  flashlightApp = pkgs.runCommand "flashlight-app" { } ''
+    mkdir -p $out/share/applications
+    cat > $out/share/applications/flashlight.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Flashlight
+GenericName=Torch
+Comment=Toggle the camera flashlight
+Exec=torch toggle
+Icon=flashlight-symbolic
+Terminal=false
+Categories=Utility;
+X-Purism-FormFactor=Workstation;Mobile;
+EOF
+  '';
 in
 {
   imports = [
@@ -317,6 +381,24 @@ in
   };
 
   # ---------------------------------------------------------------------------
+  # GPU Performance Governor (Mali-T860 → 600MHz for smooth camera debayer)
+  # ---------------------------------------------------------------------------
+  systemd.services.gpu-performance = {
+    description = "Set Mali-T860 GPU to performance governor";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "gpu-perf" ''
+        echo performance > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
+      '';
+      ExecStop = pkgs.writeShellScript "gpu-ondemand" ''
+        echo simple_ondemand > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
+      '';
+    };
+  };
+
+  # ---------------------------------------------------------------------------
   # Desktop Schemas & DConf (For On-Screen Keyboard & GNOME Settings)
   # ---------------------------------------------------------------------------
   programs.dconf = {
@@ -430,6 +512,11 @@ in
     audioSwitchUtil
     chromiumMobile
     scaleToFitUtil
+    torchUtil
+    flashlightApp
+    chatty
+    dnsmasq
+    iptables
     (pkgs.runCommandCC "send-key-esc" { } ''
       mkdir -p $out/bin
       $CC -O2 -x c - -o $out/bin/send-key-esc << 'EOF'
@@ -471,6 +558,133 @@ int main() {
 EOF
     '')
   ];
+
+  # ---------------------------------------------------------------------------
+  # Megapixels Camera Pipeline Configuration for PinePhone Pro
+  # ---------------------------------------------------------------------------
+  environment.etc."megapixels/config/pine64,pinephone-pro.conf" = {
+    mode = "0644";
+    text = ''
+      Version = 1;
+      Make: "PINE64";
+      Model: "PinePhone Pro";
+
+      Rear: {
+          SensorDriver: "imx258";
+          BridgeDriver: "rkisp1";
+
+           Modes: (
+              {
+                  Width: 4208;
+                  Height: 3120;
+                  Rate: 30;
+                  Format: "RGGB8";
+                  Rotate: 270;
+                  FocalLength: 3.33;
+                  FNumber: 3.0;
+
+                  Pipeline: (
+                      {Type: "Link", From: "imx258", FromPad: 0, To: "rkisp1_csi", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_csi", FromPad: 1, To: "rkisp1_isp", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_isp", FromPad: 2, To: "rkisp1_resizer_mainpath", ToPad: 0},
+                      {Type: "Mode", Entity: "imx258", Format: "RGGB10P"},
+                      {Type: "Mode", Entity: "rkisp1_csi"},
+                      {Type: "Mode", Entity: "rkisp1_isp"},
+                      {Type: "Mode", Entity: "rkisp1_isp", Pad: 2, Format: "RGGB8", SkipTry: true},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath"},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath", Pad: 1},
+                      {Type: "Crop", Entity: "rkisp1_isp"},
+                      {Type: "Crop", Entity: "rkisp1_isp", Pad: 2},
+                      {Type: "Crop", Entity: "rkisp1_resizer_mainpath"}
+                  );
+              },
+              {
+                  Width: 1048;
+                  Height: 780;
+                  Rate: 30;
+                  Format: "RGGB8";
+                  Rotate: 270;
+                  FocalLength: 3.33;
+                  FNumber: 3.0;
+
+                  Pipeline: (
+                      {Type: "Link", From: "imx258", FromPad: 0, To: "rkisp1_csi", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_csi", FromPad: 1, To: "rkisp1_isp", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_isp", FromPad: 2, To: "rkisp1_resizer_mainpath", ToPad: 0},
+                      {Type: "Mode", Entity: "imx258", Format: "RGGB10P"},
+                      {Type: "Mode", Entity: "rkisp1_csi"},
+                      {Type: "Mode", Entity: "rkisp1_isp"},
+                      {Type: "Mode", Entity: "rkisp1_isp", Pad: 2, Format: "RGGB8", SkipTry: true},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath"},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath", Pad: 1},
+                      {Type: "Crop", Entity: "rkisp1_isp"},
+                      {Type: "Crop", Entity: "rkisp1_isp", Pad: 2},
+                      {Type: "Crop", Entity: "rkisp1_resizer_mainpath"}
+                  );
+              }
+          );
+      };
+
+      Front: {
+          SensorDriver: "ov8858";
+          BridgeDriver: "rkisp1";
+          FlashDisplay: true;
+
+          Modes: (
+              {
+                  Width: 3264;
+                  Height: 2448;
+                  Rate: 30;
+                  Format: "BGGR8";
+                  Rotate: 90;
+                  FocalLength: 3.33;
+                  FNumber: 3.0;
+                  Mirror: true;
+
+                  Pipeline: (
+                      {Type: "Link", From: "ov8858", FromPad: 0, To: "rkisp1_csi", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_csi", FromPad: 1, To: "rkisp1_isp", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_isp", FromPad: 2, To: "rkisp1_resizer_mainpath", ToPad: 0},
+                      {Type: "Mode", Entity: "ov8858", Format: "BGGR10"},
+                      {Type: "Mode", Entity: "rkisp1_csi"},
+                      {Type: "Mode", Entity: "rkisp1_isp"},
+                      {Type: "Mode", Entity: "rkisp1_isp", Pad: 2, Format: "BGGR8", SkipTry: true},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath"},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath", Pad: 1},
+                      {Type: "Crop", Entity: "rkisp1_isp"},
+                      {Type: "Crop", Entity: "rkisp1_isp", Pad: 2},
+                      {Type: "Crop", Entity: "rkisp1_resizer_mainpath"}
+                  );
+              },
+              {
+                  Width: 1048;
+                  Height: 780;
+                  Rate: 30;
+                  Format: "BGGR8";
+                  Rotate: 90;
+                  FocalLength: 3.33;
+                  FNumber: 3.0;
+                  Mirror: true;
+
+                  Pipeline: (
+                      {Type: "Link", From: "ov8858", FromPad: 0, To: "rkisp1_csi", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_csi", FromPad: 1, To: "rkisp1_isp", ToPad: 0},
+                      {Type: "Link", From: "rkisp1_isp", FromPad: 2, To: "rkisp1_resizer_mainpath", ToPad: 0},
+                      {Type: "Mode", Entity: "ov8858", Format: "BGGR10", Width: 1632, Height: 1224},
+                      {Type: "Mode", Entity: "rkisp1_csi"},
+                      {Type: "Mode", Entity: "rkisp1_isp"},
+                      {Type: "Mode", Entity: "rkisp1_isp", Pad: 2, Format: "BGGR8", Width: 1048, Height: 780, SkipTry: true},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath"},
+                      {Type: "Mode", Entity: "rkisp1_resizer_mainpath", Pad: 1},
+                      {Type: "Crop", Entity: "rkisp1_isp"},
+                      {Type: "Crop", Entity: "rkisp1_isp", Pad: 2},
+                      {Type: "Crop", Entity: "rkisp1_resizer_mainpath"}
+                  );
+              }
+          );
+      };
+    '';
+  };
   # ---------------------------------------------------------------------------
   # Hardware Graphics & Bluetooth (Mesa / Panfrost GPU & AP6255 Broadcom BT)
   # ---------------------------------------------------------------------------
@@ -571,7 +785,24 @@ EOF
       workstation = true;
     };
   };
-  networking.firewall.allowedUDPPorts = [ 5353 ]; # mDNS
+  networking.firewall = {
+    enable = true;
+    allowedUDPPorts = [ 53 67 68 5353 ]; # DNS (53), DHCP Server/Client (67/68), mDNS (5353)
+    allowedTCPPorts = [ 53 22 ];
+    checkReversePath = false;
+    extraCommands = ''
+      # Allow hotspot DHCP and DNS traffic
+      iptables -A nixos-fw -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+      iptables -A nixos-fw -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+      iptables -A nixos-fw -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+    '';
+  };
+
+  # Enable IPv4 & IPv6 forwarding for Hotspot / Tethering to cellular
+  boot.kernel.sysctl = {
+    "net.ipv4.ip_forward" = 1;
+    "net.ipv6.conf.all.forwarding" = 1;
+  };
 
   services.haveged.enable = true;
   networking.networkmanager.enable = true;
@@ -593,6 +824,31 @@ EOF
   services.eg25-manager.enable = true;
   programs.calls.enable = true;
   networking.modemmanager.enable = true;
+
+  # Mint Mobile GSM data APN (T-Mobile MVNO, apn=wholesale)
+  environment.etc."NetworkManager/system-connections/Mint.nmconnection" = {
+    text = ''
+      [connection]
+      id=Mint
+      uuid=ac25f14b-32d8-457f-b56d-f8c2fa8e1a38
+      type=gsm
+
+      [gsm]
+      apn=wholesale
+      home-only=true
+      sim-id=8901240517129720516
+
+      [ipv4]
+      dns-priority=120
+      method=auto
+      route-metric=1050
+
+      [ipv6]
+      addr-gen-mode=default
+      method=auto
+    '';
+    mode = "0600";
+  };
 
   # Pre-configured WiFi connection so SSH is available on first boot
   environment.etc."NetworkManager/system-connections/noobiemcfoob.nmconnection" = {
@@ -652,6 +908,9 @@ EOF
   # ---------------------------------------------------------------------------
   # Disable MAC address randomization to prevent brcmfmac chanspec failures (-52)
   mobile.quirks.wifi.disableMacAddressRandomization = true;
+
+  # chatty (SMS client) depends on olm for E2E encryption support
+  nixpkgs.config.permittedInsecurePackages = [ "olm-3.2.16" ];
 
   # Silence non-critical kernel warning log spam on tty1 screen
   boot.consoleLogLevel = 3;
