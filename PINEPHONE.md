@@ -346,11 +346,37 @@ Alternatively, Mobile NixOS includes a prepackaged `examples/phosh` target:
 nix-build examples/phosh --argstr device pine64-pinephonepro --argstr system aarch64-linux -A outputs.disk-image
 ```
 
+### Example build script
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+echo "==> 1. Syncing local source code to builder..."
+rsync -avz --exclude='.git' /home/musengdir/mobile-nixos/ nixos@h4x0r.local:~/mobile-nixos/
+echo "==> 2. Building full disk image on builder..."
+ssh nixos@h4x0r.local "cd ~/mobile-nixos && nix-build --argstr device pine64-pinephonepro --argstr system aarch64-linux -A outputs.disk-image"
+```
+
 ---
 
 ## 4. Syncing to Remote Builder (`nixos@h4x0r.local`)
 
 ```bash
-rsync -avz --exclude='.git' /home/musengdir/mobile-nixos/ nixos@h4x0r.local:~/mobile-nixos/
-ssh nixos@h4x0r.local "cd ~/mobile-nixos && nix-build --argstr device pine64-pinephonepro --argstr system aarch64-linux -A outputs.disk-image"
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> 1. Syncing local source code to builder..."
+rsync -avz --exclude='.git' /home/musengdir/pinephone-nixos/ nixos@h4x0r.local:~/pinephone-nixos/
+
+echo "==> 2. Building toplevel system derivation on builder..."
+ssh nixos@h4x0r.local "cd ~/pinephone-nixos && nix-build --argstr device pine64-pinephonepro --argstr system aarch64-linux -A config.system.build.toplevel --out-link result-toplevel"
+
+echo "==> 3. Copying system closure from builder to PinePhone Pro..."
+ssh nixos@h4x0r.local "cd ~/pinephone-nixos && export NIX_SSHOPTS='-o StrictHostKeyChecking=no' && nix-copy-closure --to pine@pinephone-pro.local result-toplevel"
+
+echo "==> 4. Setting system profile and switching configuration on PinePhone Pro..."
+STORE_PATH=$(ssh nixos@h4x0r.local "readlink -f ~/pinephone-nixos/result-toplevel")
+ssh pine@pinephone-pro.local "echo 1234 | sudo -S nix-env -p /nix/var/nix/profiles/system --set $STORE_PATH && echo 1234 | sudo -S /nix/var/nix/profiles/system/bin/switch-to-configuration switch"
+
+echo "==> Done! System is live and set as default boot target."
 ```

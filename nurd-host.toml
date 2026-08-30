@@ -1,0 +1,18 @@
+listen_address = "0.0.0.0"
+port = 8787
+provider = "openai"
+
+[openai]
+api_token = "replace-with-openai-api-key"
+model = "gpt-5.4-mini"
+base_url = "https://api.openai.com/v1"
+max_output_tokens = 1600
+request_timeout_seconds = 90
+image_detail = "high"
+
+[tablet_control]
+enabled = false
+api_token = "replace-with-a-long-random-control-token"
+registry_path = "nurd-tablets.json"
+ssh_user = "root"
+ssh_connect_timeout_seconds = 8

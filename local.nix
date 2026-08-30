@@ -3,6 +3,12 @@
 let
   defaultUser = "pine";
 
+  renurdHostApp =
+    (builtins.getFlake (toString ../renurd)).apps.${pkgs.stdenv.hostPlatform.system}.host;
+  renurd-host = pkgs.writeShellScriptBin "renurd-host" ''
+    exec ${renurdHostApp.program} "$@"
+  '';
+
   chromiumMobile = pkgs.runCommand "chromium-mobile" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -250,6 +256,16 @@ in
   # System Identity & Nix Settings
   # ---------------------------------------------------------------------------
   networking.hostName = "pinephone-pro";
+  time.timeZone = "America/New_York";
+  services.timesyncd = {
+    enable = true;
+    servers = [
+      "0.nixos.pool.ntp.org"
+      "1.nixos.pool.ntp.org"
+      "2.nixos.pool.ntp.org"
+      "3.nixos.pool.ntp.org"
+    ];
+  };
   system.stateVersion = "26.11";
   nix.settings.trusted-users = [ "root" defaultUser "@wheel" ];
 
@@ -517,6 +533,7 @@ in
     chatty
     dnsmasq
     iptables
+    renurd-host
     (pkgs.runCommandCC "send-key-esc" { } ''
       mkdir -p $out/bin
       $CC -O2 -x c - -o $out/bin/send-key-esc << 'EOF'
@@ -788,7 +805,7 @@ EOF
   networking.firewall = {
     enable = true;
     allowedUDPPorts = [ 53 67 68 5353 ]; # DNS (53), DHCP Server/Client (67/68), mDNS (5353)
-    allowedTCPPorts = [ 53 22 ];
+    allowedTCPPorts = [ 53 22 8787 ];
     checkReversePath = false;
     extraCommands = ''
       # Allow hotspot DHCP and DNS traffic
@@ -805,7 +822,29 @@ EOF
   };
 
   services.haveged.enable = true;
-  networking.networkmanager.enable = true;
+  networking.networkmanager = {
+    enable = true;
+    ensureProfiles.profiles."Phosh Hotspot" = {
+      connection = {
+        id = "Phosh Hotspot";
+        uuid = "70aad898-a63b-44f7-85e3-a3819c1d4c23";
+        type = "wifi";
+        interface-name = "wlan0";
+        autoconnect = false;
+      };
+      wifi = {
+        mode = "ap";
+        band = "bg";
+        ssid = "noobnix";
+      };
+      wifi-security = {
+        key-mgmt = "wpa-psk";
+        psk = "n00biemcfoob";
+      };
+      ipv4.method = "shared";
+      ipv6.method = "ignore";
+    };
+  };
   services.openssh.enable = true;
   services.openssh.settings.PermitRootLogin = "yes";
 
@@ -873,6 +912,27 @@ EOF
       method=disabled
     '';
     mode = "0600";
+  };
+
+  environment.etc."renurd/nurd-host.toml" = {
+    source = ./nurd-host.toml;
+    mode = "0600";
+  };
+
+  systemd.services.renurd-host = {
+    description = "Renurd host service";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    environment.NURD_HOST_CONFIG = "/etc/renurd/nurd-host.toml";
+    serviceConfig = {
+      Type = "simple";
+      ExecStart = "${renurd-host}/bin/renurd-host";
+      Restart = "on-failure";
+      RestartSec = 5;
+      StateDirectory = "renurd-host";
+      WorkingDirectory = "/var/lib/renurd-host";
+    };
   };
 
   # Static IP on the RNDIS USB gadget interface so we can SSH over USB cable
