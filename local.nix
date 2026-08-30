@@ -250,7 +250,15 @@ in
 {
   imports = [
     ./examples/phosh/phosh.nix
+    ./power-management.nix
   ];
+
+  # Persistent fuel-gauge telemetry, a local graph, adaptive CPU/GPU profiles,
+  # and an orderly shutdown before an aging battery reaches an unstable state.
+  pinephone.power = {
+    enable = true;
+    defaultProfile = "auto";
+  };
 
   # ---------------------------------------------------------------------------
   # System Identity & Nix Settings
@@ -392,24 +400,6 @@ in
           sleep 0.5
           echo fe800000.usb > /sys/bus/platform/drivers/dwc3/bind 2>/dev/null || true
         fi
-      '';
-    };
-  };
-
-  # ---------------------------------------------------------------------------
-  # GPU Performance Governor (Mali-T860 → 600MHz for smooth camera debayer)
-  # ---------------------------------------------------------------------------
-  systemd.services.gpu-performance = {
-    description = "Set Mali-T860 GPU to performance governor";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "gpu-perf" ''
-        echo performance > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
-      '';
-      ExecStop = pkgs.writeShellScript "gpu-ondemand" ''
-        echo simple_ondemand > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
       '';
     };
   };
