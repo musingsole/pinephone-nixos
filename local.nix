@@ -3,6 +3,18 @@
 let
   defaultUser = "pine";
 
+  # Let a display manager create the PAM/logind session and own the active VT.
+  # Phosh itself remains the unmodified Nixpkgs package.
+  phoshSession = pkgs.writeShellScript "start-phosh-session" ''
+    export XDG_CURRENT_DESKTOP="Phosh:GNOME"
+    export XDG_SESSION_DESKTOP="phosh"
+    export XDG_SESSION_TYPE="wayland"
+    export WLR_DRM_DEVICES="/dev/dri/card1:/dev/dri/card0"
+    exec ${lib.getExe config.services.xserver.desktopManager.phosh.package}
+  '';
+
+  powerButtonPackage = pkgs.callPackage ./pkgs/pinephone-power-button { };
+
   renurdHostApp =
     (builtins.getFlake (toString ../renurd)).apps.${pkgs.stdenv.hostPlatform.system}.host;
   renurd-host = pkgs.writeShellScriptBin "renurd-host" ''
@@ -299,7 +311,6 @@ in
       "audio"
       "feedbackd"
       "dialout"
-      "seat"
       "tty"
     ];
     openssh.authorizedKeys.keys = [
@@ -309,14 +320,29 @@ in
   };
 
   # ---------------------------------------------------------------------------
-  # Seat Management (seatd allows non-root user to access DRM & VTs)
+  # Graphical Login / Seat Ownership
   # ---------------------------------------------------------------------------
-  services.seatd.enable = true;
-
-  # Phosh service environment & backend configuration
-  systemd.services.phosh.environment = {
-    LIBSEAT_BACKEND = "seatd";
-    WLR_DRM_DEVICES = "/dev/dri/card1:/dev/dri/card0";
+  # The Mobile NixOS Phosh module's direct system service can run on tty1 while
+  # logind considers another VT foreground. In that state logind rejects the
+  # stock Phosh brightness request with NotYourDevice. Greetd performs the VT
+  # activation and PAM login before launching the unchanged Phosh session.
+  systemd.services.phosh.enable = false;
+  services.greetd = {
+    enable = true;
+    settings = {
+      initial_session = {
+        command = toString phoshSession;
+        user = defaultUser;
+      };
+      default_session = {
+        command = "${lib.getExe' pkgs.greetd "agreety"} --cmd ${phoshSession}";
+        user = "greeter";
+      };
+    };
+  };
+  systemd.services.greetd = {
+    wants = [ "systemd-logind.service" "pinephone-power-button.service" ];
+    after = [ "systemd-logind.service" "pinephone-power-button.service" ];
   };
 
   # ---------------------------------------------------------------------------
@@ -337,43 +363,20 @@ in
   systemd.targets.hybrid-sleep.enable = false;
   systemd.targets.suspend-then-hibernate.enable = false;
 
-  # ---------------------------------------------------------------------------
-  # Power Button Screen Lock & Wake Daemon
-  # ---------------------------------------------------------------------------
-  systemd.services.pinephone-power-toggle = {
-    description = "PinePhone Pro Power Button Lock & Wake Service";
+  # Native Phosh DPMS wake can hard-lock this device's RK3399 DSI/VOP pipeline.
+  # Exclusively grab KEY_POWER so Phosh cannot enter DPMS, lock through logind,
+  # and turn off only the panel backlight. The compositor and DRM pipeline stay
+  # active, avoiding the failing hardware power-cycle while the screen is dark.
+  systemd.services.pinephone-power-button = {
+    description = "PinePhone Pro Backlight-Only Power Button";
     wantedBy = [ "multi-user.target" ];
+    wants = [ "systemd-logind.service" ];
+    after = [ "systemd-logind.service" ];
+    before = [ "greetd.service" ];
     serviceConfig = {
-      ExecStart = pkgs.writeShellScript "pinephone-power-toggle" ''
-        KEY_DEV="/dev/input/by-path/platform-gpio-keys-event"
-        DPMS_PATH="/sys/class/drm/card1-DSI-1/dpms"
-        BL_PATH="/sys/class/backlight/backlight/brightness"
-
-        while true; do
-          if [ -e "$KEY_DEV" ]; then
-            ${pkgs.coreutils}/bin/dd if="$KEY_DEV" bs=24 count=1 status=none 2>/dev/null || sleep 0.2
-          else
-            sleep 1
-            continue
-          fi
-
-          STATE=$(${pkgs.coreutils}/bin/cat "$DPMS_PATH" 2>/dev/null || echo "On")
-          BL=$(${pkgs.coreutils}/bin/cat "$BL_PATH" 2>/dev/null || echo "51")
-
-          if [ "$STATE" = "Off" ] || [ "$BL" = "0" ]; then
-            ${pkgs.sudo}/bin/sudo -u ${defaultUser} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus ${pkgs.systemd}/bin/busctl --user set-property org.gnome.Mutter.DisplayConfig /org/gnome/Mutter/DisplayConfig org.gnome.Mutter.DisplayConfig PowerSaveMode i 0 2>/dev/null || true
-            ${pkgs.sudo}/bin/sudo -u ${defaultUser} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus ${pkgs.systemd}/bin/busctl --user call org.gnome.ScreenSaver /org/gnome/ScreenSaver org.gnome.ScreenSaver SetActive b false 2>/dev/null || true
-            echo 51 > "$BL_PATH" 2>/dev/null || true
-            /run/current-system/sw/bin/send-key-esc 2>/dev/null || true
-          else
-            ${pkgs.systemd}/bin/loginctl lock-session 2>/dev/null || true
-            ${pkgs.sudo}/bin/sudo -u ${defaultUser} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus ${pkgs.systemd}/bin/busctl --user set-property org.gnome.Mutter.DisplayConfig /org/gnome/Mutter/DisplayConfig org.gnome.Mutter.DisplayConfig PowerSaveMode i 3 2>/dev/null || true
-            echo 0 > "$BL_PATH" 2>/dev/null || true
-          fi
-          sleep 0.3
-        done
-      '';
+      ExecStart = "${powerButtonPackage}/bin/pinephone-power-button --fallback-brightness 51";
       Restart = "always";
+      RestartSec = 1;
     };
   };
 
@@ -411,6 +414,10 @@ in
     enable = true;
     profiles.user.databases = [
       {
+        # Phosh's package default is 60 seconds, and an older writable user
+        # value can otherwise override this database.  Lock the setting so
+        # Phosh never asks the unreliable RK3399 DSI/VOP path to enter DPMS.
+        locks = [ "/org/gnome/desktop/session/idle-delay" ];
         settings = {
           "org/gnome/settings-daemon/plugins/media-keys" = {
             power = lib.gvariant.mkEmptyArray "s";
@@ -510,11 +517,18 @@ in
     epiphany
   ];
 
+  # This image does not manage a root Nix channel. Point legacy commands such
+  # as `nix-shell -p htop` at the same pinned Nixpkgs used to build the system.
+  nix.nixPath = [
+    "nixpkgs=${lib.cleanSource pkgs.path}"
+  ];
+
   environment.systemPackages = with pkgs; [
     alsa-utils
     wireplumber
     pulseaudio
     pavucontrol
+    htop
     audioSwitchUtil
     chromiumMobile
     scaleToFitUtil
@@ -524,46 +538,6 @@ in
     dnsmasq
     iptables
     renurd-host
-    (pkgs.runCommandCC "send-key-esc" { } ''
-      mkdir -p $out/bin
-      $CC -O2 -x c - -o $out/bin/send-key-esc << 'EOF'
-#include <linux/uinput.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-#include <sys/ioctl.h>
-
-int main() {
-    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (fd < 0) return 1;
-    ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(fd, UI_SET_KEYBIT, KEY_ESC);
-    struct uinput_setup usetup;
-    memset(&usetup, 0, sizeof(usetup));
-    usetup.id.bustype = BUS_USB;
-    usetup.id.vendor = 0x1;
-    usetup.id.product = 0x1;
-    strcpy(usetup.name, "virtual-esc-key");
-    ioctl(fd, UI_DEV_SETUP, &usetup);
-    ioctl(fd, UI_DEV_CREATE);
-    usleep(50000);
-
-    struct input_event ev[2];
-    memset(ev, 0, sizeof(ev));
-    ev[0].type = EV_KEY; ev[0].code = KEY_ESC; ev[0].value = 1;
-    ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
-    (void)write(fd, ev, sizeof(ev));
-    usleep(20000);
-    ev[0].value = 0;
-    (void)write(fd, ev, sizeof(ev));
-    usleep(20000);
-
-    ioctl(fd, UI_DEV_DESTROY);
-    close(fd);
-    return 0;
-}
-EOF
-    '')
   ];
 
   # ---------------------------------------------------------------------------

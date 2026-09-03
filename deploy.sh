@@ -30,6 +30,72 @@ ssh nixos@h4x0r.local "cd ~/pinephone-nixos && export NIX_SSHOPTS='-o StrictHost
 
 echo "==> 4. Setting system profile and switching configuration on PinePhone Pro..."
 STORE_PATH=$(ssh nixos@h4x0r.local "readlink -f ~/pinephone-nixos/result-toplevel")
-ssh pine@pinephone-pro.local "echo 1234 | sudo -S nix-env -p /nix/var/nix/profiles/system --set $STORE_PATH && echo 1234 | sudo -S /nix/var/nix/profiles/system/bin/switch-to-configuration switch"
+ssh pine@pinephone-pro.local bash -s -- "$STORE_PATH" <<'REMOTE'
+set -u
+
+store_path=$1
+sudo_run() {
+  printf '%s\n' 1234 | sudo -S -p '' "$@"
+}
+
+sudo_run nix-env -p /nix/var/nix/profiles/system --set "$store_path"
+
+# Preserve the switch result, then verify that greetd created a foreground
+# Wayland session. This is also the condition required for logind-mediated
+# brightness control; merely seeing a running compositor is insufficient.
+switch_status=0
+sudo_run /nix/var/nix/profiles/system/bin/switch-to-configuration switch || switch_status=$?
+
+export XDG_RUNTIME_DIR=/run/user/1000
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+for _attempt in $(seq 1 30); do
+  if ! systemctl --user list-jobs --no-legend 2>/dev/null \
+    | grep -Eq '^[[:space:]]*[0-9]+'; then
+    break
+  fi
+  sleep 1
+done
+
+if ! systemctl is-active --quiet greetd.service; then
+  sudo_run systemctl reset-failed greetd.service
+  sudo_run systemctl start greetd.service
+fi
+
+if ! systemctl is-active --quiet greetd.service; then
+  systemctl status --no-pager greetd.service || true
+  exit 1
+fi
+
+foreground_wayland=false
+for _attempt in $(seq 1 30); do
+  active_session=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null || true)
+  if [[ -n "$active_session" ]] \
+    && [[ $(loginctl show-session "$active_session" --property=Type --value 2>/dev/null || true) == wayland ]]; then
+    foreground_wayland=true
+    break
+  fi
+  sleep 1
+done
+
+if [[ $foreground_wayland != true ]]; then
+  loginctl seat-status seat0 || true
+  systemctl status --no-pager greetd.service || true
+  exit 1
+fi
+
+failed_units=$(systemctl --failed --no-legend --plain --no-pager \
+  | awk '$1 ~ /\.(service|socket|target|mount|device|scope)$/ { print $1 }')
+if [[ -n "${failed_units//[[:space:]]/}" ]]; then
+  printf '%s\n' "$failed_units" >&2
+  if (( switch_status != 0 )); then
+    exit "$switch_status"
+  fi
+  exit 1
+fi
+
+if (( switch_status != 0 )); then
+  echo "switch-to-configuration reported status $switch_status; all failed units recovered"
+fi
+REMOTE
 
 echo "==> Done! System is live and set as default boot target."

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>PinePhone Battery Monitor</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101419; --panel:#1a2028; --muted:#91a0ae; --grid:#34404c; --green:#71d790; --blue:#70b7ff; --orange:#ffb45e; --red:#ff6b6b; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:#f3f7fa; font:15px system-ui,sans-serif; }
+    main { width:min(100%,960px); margin:auto; padding:18px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+    h1 { font-size:1.35rem; margin:0; }
+    select { color:inherit; background:var(--panel); border:1px solid var(--grid); border-radius:8px; padding:8px; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:10px; }
+    .card,.chart { background:var(--panel); border:1px solid #27313b; border-radius:13px; padding:13px; }
+    .label { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+    .value { font-size:1.55rem; font-weight:650; margin-top:5px; }
+    .detail { color:var(--muted); font-size:.8rem; margin-top:3px; min-height:1em; }
+    .chart { margin-top:10px; padding:12px 8px 6px; }
+    .chart-head { display:flex; justify-content:space-between; padding:0 6px 7px; color:var(--muted); font-size:.82rem; }
+    canvas { width:100%; height:190px; display:block; }
+    .legend { display:flex; flex-wrap:wrap; gap:14px; margin:13px 5px 0; color:var(--muted); font-size:.82rem; }
+    .key::before { content:""; display:inline-block; width:10px; height:3px; margin:0 5px 3px 0; background:var(--key); }
+    .note { color:var(--muted); line-height:1.45; font-size:.82rem; margin:14px 4px; }
+    .error { color:var(--red); }
+    @media (max-width:500px) { main{padding:12px} canvas{height:160px} .value{font-size:1.3rem} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Battery Monitor</h1>
+    <select id="range" aria-label="Graph time range">
+      <option value="6">6 hours</option><option value="24" selected>24 hours</option>
+      <option value="72">3 days</option><option value="168">7 days</option><option value="720">30 days</option>
+    </select>
+  </header>
+  <section class="cards">
+    <div class="card"><div class="label">Charge</div><div class="value" id="charge">—</div><div class="detail" id="status">Waiting for data</div></div>
+    <div class="card"><div class="label">Battery flow</div><div class="value" id="power">—</div><div class="detail" id="current">—</div></div>
+    <div class="card"><div class="label">Voltage</div><div class="value" id="voltage">—</div><div class="detail" id="temperature">—</div></div>
+    <div class="card"><div class="label">Learned health</div><div class="value" id="health">—</div><div class="detail" id="capacity">—</div></div>
+    <div class="card"><div class="label">Estimate</div><div class="value" id="estimate">—</div><div class="detail">instantaneous at present load</div></div>
+    <div class="card"><div class="label">Power profile</div><div class="value" id="profile">—</div><div class="detail" id="frequencies">—</div></div>
+  </section>
+  <section class="chart"><div class="chart-head"><span>Charge</span><span id="chargeRange"></span></div><canvas id="chargeChart"></canvas></section>
+  <section class="chart"><div class="chart-head"><span>Battery flow</span><span id="powerRange"></span></div><canvas id="powerChart"></canvas></section>
+  <div class="legend"><span class="key" style="--key:var(--green)">charge %</span><span class="key" style="--key:var(--blue)">discharging W</span><span class="key" style="--key:var(--orange)">charging W</span></div>
+  <p class="note">Battery flow is measured at the RK818 fuel gauge. Positive values mean energy leaving the battery; negative values mean net charging. While plugged in, this is not the phone's total wall-power consumption. Raw samples are retained in <code>/var/lib/pinephone-power-monitor/samples.csv</code>.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id), fmt=(v,n=1)=>v==null?'—':Number(v).toFixed(n);
+function resize(canvas){const d=devicePixelRatio||1,r=canvas.getBoundingClientRect();canvas.width=r.width*d;canvas.height=r.height*d;return {c:canvas.getContext('2d'),w:r.width,h:r.height,d};}
+function plot(id,rows,field,color,rangeLabel,zero=false){
+  const canvas=$(id),{c,w,h,d}=resize(canvas);c.scale(d,d);c.clearRect(0,0,w,h);
+  const pts=rows.filter(r=>r[field]!=null);if(pts.length<2){c.fillStyle='#91a0ae';c.fillText('Not enough history yet',12,25);return;}
+  let vals=pts.map(p=>Number(p[field])),lo=Math.min(...vals),hi=Math.max(...vals);if(field==='capacity_percent'){lo=0;hi=100;}else{lo=Math.min(lo,0);hi=Math.max(hi,0);if(hi===lo)hi=lo+1;}
+  const pad={l:38,r:8,t:7,b:21},x=p=>pad.l+(p.epoch-pts[0].epoch)/(pts.at(-1).epoch-pts[0].epoch)*(w-pad.l-pad.r),y=v=>pad.t+(hi-v)/(hi-lo)*(h-pad.t-pad.b);
+  c.strokeStyle='#34404c';c.lineWidth=1;for(let i=0;i<=4;i++){let yy=pad.t+i*(h-pad.t-pad.b)/4;c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.fillStyle='#91a0ae';c.font='10px system-ui';c.fillText(fmt(hi-i*(hi-lo)/4,field==='capacity_percent'?0:1),3,yy+3);}
+  if(zero&&lo<0&&hi>0){c.strokeStyle='#71808e';c.beginPath();c.moveTo(pad.l,y(0));c.lineTo(w-pad.r,y(0));c.stroke();}
+  c.lineWidth=2;
+  if(zero){for(let i=1;i<pts.length;i++){c.strokeStyle=(Number(pts[i-1][field])+Number(pts[i][field]))/2<0?'#ffb45e':'#70b7ff';c.beginPath();c.moveTo(x(pts[i-1]),y(Number(pts[i-1][field])));c.lineTo(x(pts[i]),y(Number(pts[i][field])));c.stroke();}}
+  else{c.strokeStyle=color;c.beginPath();pts.forEach((p,i)=>{let xx=x(p),yy=y(Number(p[field]));i?c.lineTo(xx,yy):c.moveTo(xx,yy)});c.stroke();}
+  const start=new Date(pts[0].epoch*1000),end=new Date(pts.at(-1).epoch*1000);c.fillStyle='#91a0ae';c.font='10px system-ui';c.fillText(start.toLocaleString([], {month:'short',day:'numeric',hour:'numeric'}),pad.l,h-5);const t=end.toLocaleString([], {month:'short',day:'numeric',hour:'numeric'}),tw=c.measureText(t).width;c.fillText(t,w-pad.r-tw,h-5);
+  $(rangeLabel).textContent=`${fmt(Math.min(...vals),1)} – ${fmt(Math.max(...vals),1)}${field==='capacity_percent'?'%':' W'}`;
+}
+async function refresh(){
+  try{
+    const [curRes,rowsRes]=await Promise.all([fetch('/api/current'),fetch('/api/samples?hours='+$('range').value)]),cur=await curRes.json(),rows=await rowsRes.json();
+    $('charge').textContent=cur.capacity_percent==null?'—':cur.capacity_percent+'%';$('status').textContent=`${cur.status||'Unknown'} · ${cur.external_power?'external power':'on battery'}`;
+    $('power').textContent=cur.power_uw==null?'—':fmt(cur.power_uw/1e6,2)+' W';$('current').textContent=cur.current_ua==null?'current unavailable':fmt(cur.current_ua/1e6,2)+' A';
+    $('voltage').textContent=cur.voltage_uv==null?'—':fmt(cur.voltage_uv/1e6,3)+' V';$('temperature').textContent=cur.temperature_decic==null?'temperature unavailable':fmt(cur.temperature_decic/10,1)+' °C';
+    const s=cur.summary||{};$('health').textContent=s.learnedCapacityPercent==null?'—':s.learnedCapacityPercent+'%';$('capacity').textContent=cur.charge_full_uah&&cur.charge_full_design_uah?`${fmt(cur.charge_full_uah/1e6,2)} / ${fmt(cur.charge_full_design_uah/1e6,2)} Ah`:'learned capacity unavailable';
+    $('estimate').textContent=s.instantaneousHoursRemaining==null?'—':fmt(s.instantaneousHoursRemaining,1)+' h';$('profile').textContent=cur.profile||'—';$('frequencies').textContent=`CPU ${fmt(cur.cpu_average_khz/1e6,2)} GHz · GPU ${fmt(cur.gpu_frequency_hz/1e6,0)} MHz`;
+    const graphRows=rows.map(r=>({...r,power_w:r.power_uw==null?null:r.power_uw/1e6}));plot('chargeChart',graphRows,'capacity_percent','#71d790','chargeRange');plot('powerChart',graphRows,'power_w','#70b7ff','powerRange',true);
+  }catch(e){$('status').innerHTML='<span class="error">Monitor unavailable</span>';}
+}
+$('range').addEventListener('change',refresh);addEventListener('resize',refresh);refresh();setInterval(refresh,30000);
+</script>
+</body>
+</html>

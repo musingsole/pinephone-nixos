@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Battery Monitor
+GenericName=Power Monitor
+Comment=View battery history, power flow, temperature, and active power profile
+Exec=pinephone-power-monitor open
+Icon=battery-good-symbolic
+Terminal=false
+Categories=System;Monitor;
+X-Purism-FormFactor=Workstation;Mobile;

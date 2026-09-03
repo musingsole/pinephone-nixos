@@ -2,6 +2,59 @@
 
 This guide provides instructions for configuring, building, and flashing a Mobile NixOS Phosh image for the **PinePhone Pro** (`pine64-pinephonepro`).
 
+## Battery monitoring and power profiles
+
+The local configuration enables `pinephone.power`, which samples the RK818
+fuel gauge every 30 seconds and retains 30 days of history. Open **Battery
+Monitor** from Phosh to see charge, battery-flow watts, voltage, temperature,
+learned capacity, estimated runtime, and CPU/GPU frequencies. The same data is
+available at `http://127.0.0.1:9095/` and as CSV in
+`/var/lib/pinephone-power-monitor/samples.csv`.
+
+Battery-flow watts are derived from the kernel's simultaneous `voltage_now`
+and `current_now` readings because the RK818 driver does not export
+`power_now`. Positive values are discharge and negative values are charging;
+while plugged in this is net battery flow, not total wall power.
+
+Phosh is launched unchanged through `greetd`, which creates the foreground
+PAM/logind session before starting the compositor. This lets the stock
+brightness slider use logind normally; no Phosh source patch or writable
+backlight sysfs rule is used.
+
+The power button is handled by a small exclusive input service because native
+DRM DPMS wake can hard-lock the PinePhone Pro's RK3399 DSI/VOP pipeline. A short
+press locks through logind and turns off only the panel backlight; the compositor
+and display pipeline remain active. The next short press restores the saved
+brightness and leaves the lock screen in place for normal authentication. A
+three-second press requests an orderly poweroff.
+
+The default `auto` policy uses demand-driven balanced operation (also while
+charging, to limit heat), powersave at 15%, and critical at 8%. The balanced
+GPU can still reach 600 MHz when demanded. Inspect or override the policy with:
+
+```console
+$ power-profile status
+$ sudo power-profile gateway
+$ sudo power-profile balanced
+$ sudo power-profile powersave
+$ sudo power-profile performance
+$ sudo power-profile auto
+```
+
+`gateway` is a reversible headless mode for PAN operation. It stops the
+greetd-managed Phosh session, saves and turns off the backlight, offlines the
+two RK3399 big cores, and caps the four little cores at their supported 816 MHz
+step. Bluetooth, Wi-Fi, USB host mode, the EG25 modem, NetworkManager,
+ModemManager, SSH, Renurd, forwarding, and the firewall remain available.
+Selecting `balanced`, `performance`, or `auto` on the next SSH command restores
+both big cores, the interactive services, and the saved screen brightness.
+
+To avoid the known low-charge lockup, the service requests an orderly poweroff
+after three consecutive discharging samples at 5% or below. It also shuts down
+at or below 3.4 V when charge is below 20%. Charging or reconnecting external
+power immediately clears the confirmation counter. All thresholds and profile
+frequency caps are options in `power-management.nix`.
+
 ---
 
 ## 1. Local Configuration (`local.nix`)
@@ -166,6 +219,9 @@ in
     enable = true;
     profiles.user.databases = [
       {
+        # Keep Phosh from powering down the RK3399 DSI/VOP pipeline. This is
+        # locked because a pre-existing user dconf value overrides defaults.
+        locks = [ "/org/gnome/desktop/session/idle-delay" ];
         settings = {
           "org/gnome/settings-daemon/plugins/media-keys" = {
             power = [ ];
