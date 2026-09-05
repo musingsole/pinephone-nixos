@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RENURD_DIR="${SCRIPT_DIR}/../renurd"
+HANDBALL_DIR="${SCRIPT_DIR}/../handball"
 INSTALL_ONLY=false
 
 case "${1:-}" in
@@ -19,7 +20,12 @@ if [[ ! -f "${RENURD_DIR}/flake.nix" ]]; then
   exit 1
 fi
 
-echo "==> 1. Syncing local source code and Renurd to builder..."
+if [[ ! -f "${HANDBALL_DIR}/flake.nix" ]]; then
+  echo "Missing Handball source at ${HANDBALL_DIR}" >&2
+  exit 1
+fi
+
+echo "==> 1. Syncing local source code, Renurd, and Handball to builder..."
 rsync -avz --exclude='.git' "${SCRIPT_DIR}/" nixos@h4x0r.local:~/pinephone-nixos/
 rsync -avz \
   --exclude='.git' \
@@ -31,6 +37,14 @@ rsync -avz \
   --exclude='nurd-host.toml' \
   --exclude='nurd-tablets.json' \
   "${RENURD_DIR}/" nixos@h4x0r.local:~/renurd/
+rsync -avz \
+  --exclude='.git' \
+  --exclude='target/' \
+  --exclude='result' \
+  --exclude='result-*' \
+  --exclude='web/node_modules/' \
+  --exclude='web/dist/' \
+  "${HANDBALL_DIR}/" nixos@h4x0r.local:~/handball/
 
 echo "==> 2. Building toplevel system derivation on builder..."
 ssh nixos@h4x0r.local "cd ~/pinephone-nixos && nix-build --argstr device pine64-pinephonepro --argstr system aarch64-linux -A config.system.build.toplevel --out-link result-toplevel"

@@ -14,6 +14,9 @@ let
     exec ${renurdHostApp.program} "$@"
   '';
 
+  handballNgrokApp =
+    (builtins.getFlake (toString ../handball)).apps.${pkgs.stdenv.hostPlatform.system}.handball-ngrok;
+
   chromiumMobile = pkgs.runCommand "chromium-mobile" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -260,11 +263,13 @@ in
     ./power-management.nix
   ];
 
-  # Keep the post-generation-24 adaptive power daemon out of the boot graph.
-  # Its implementation remains available for later isolated testing, but the
-  # stability image deliberately matches the known-good service topology.
+  # Restore battery telemetry and low-charge protection now that the stable
+  # boot/display baseline is established.  Keep frequency policy under the
+  # known-good gpu-performance service: repeated CPU/GPU sysfs writes are not
+  # required for monitoring and previously coincided with system stalls.
   pinephone.power = {
-    enable = false;
+    enable = true;
+    manageFrequencies = false;
   };
 
   # ---------------------------------------------------------------------------
@@ -382,8 +387,13 @@ in
     };
   };
 
-  # Match generation 24's known-good DWC3 host-role setup exactly.
+  # Let the Type-C controller select device/charger/host role from cable state.
+  # Forcing xHCI host mode after typec-extcon selected the charger/device role
+  # tears down and rebinds DWC3 while VBUS is changing; cable reattachment has
+  # produced a spurious RK818 low-voltage IRQ followed by a hard system lock.
+  # USB host peripherals can be restored later with a role-aware helper.
   systemd.services.enable-usb-host-mode = {
+    enable = false;
     description = "Enable USB Type-C Host Mode for Keyboards and Hubs";
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
@@ -920,6 +930,20 @@ in
       RestartSec = 5;
       StateDirectory = "renurd-host";
       WorkingDirectory = "/var/lib/renurd-host";
+    };
+  };
+
+  systemd.services.handball-ngrok = {
+    description = "Handball server with ngrok tunnel";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    environment.HOME = "/home/${defaultUser}";
+    serviceConfig = {
+      Type = "oneshot";
+      User = defaultUser;
+      ExecStart = handballNgrokApp.program;
+      RemainAfterExit = true;
     };
   };
 
