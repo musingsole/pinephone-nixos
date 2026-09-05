@@ -3,6 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RENURD_DIR="${SCRIPT_DIR}/../renurd"
+INSTALL_ONLY=false
+
+case "${1:-}" in
+  "") ;;
+  --install-only) INSTALL_ONLY=true ;;
+  *)
+    echo "Usage: $0 [--install-only]" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -f "${RENURD_DIR}/flake.nix" ]]; then
   echo "Missing Renurd source at ${RENURD_DIR}" >&2
@@ -30,19 +40,26 @@ ssh nixos@h4x0r.local "cd ~/pinephone-nixos && export NIX_SSHOPTS='-o StrictHost
 
 echo "==> 4. Setting system profile and switching configuration on PinePhone Pro..."
 STORE_PATH=$(ssh nixos@h4x0r.local "readlink -f ~/pinephone-nixos/result-toplevel")
-ssh pine@pinephone-pro.local bash -s -- "$STORE_PATH" <<'REMOTE'
+ssh pine@pinephone-pro.local bash -s -- "$STORE_PATH" "$INSTALL_ONLY" <<'REMOTE'
 set -u
 
 store_path=$1
+install_only=$2
 sudo_run() {
   printf '%s\n' 1234 | sudo -S -p '' "$@"
 }
 
 sudo_run nix-env -p /nix/var/nix/profiles/system --set "$store_path"
 
-# Preserve the switch result, then verify that greetd created a foreground
-# Wayland session. This is also the condition required for logind-mediated
-# brightness control; merely seeing a running compositor is insufficient.
+if [[ $install_only == true ]]; then
+  echo "Installed $store_path as the default profile; live switch intentionally skipped"
+  exit 0
+fi
+
+# Preserve the switch result, then verify the direct Mobile NixOS Phosh service
+# and the shell's D-Bus name. A running Phoc alone is insufficient because a
+# failed shell startup leaves the loading wheel up. The direct system service
+# intentionally does not become logind's foreground ActiveSession.
 switch_status=0
 sudo_run /nix/var/nix/profiles/system/bin/switch-to-configuration switch || switch_status=$?
 
@@ -56,30 +73,28 @@ for _attempt in $(seq 1 30); do
   sleep 1
 done
 
-if ! systemctl is-active --quiet greetd.service; then
-  sudo_run systemctl reset-failed greetd.service
-  sudo_run systemctl start greetd.service
+if ! systemctl is-active --quiet phosh.service; then
+  sudo_run systemctl reset-failed phosh.service
+  sudo_run systemctl start phosh.service
 fi
 
-if ! systemctl is-active --quiet greetd.service; then
-  systemctl status --no-pager greetd.service || true
+if ! systemctl is-active --quiet phosh.service; then
+  systemctl status --no-pager phosh.service || true
   exit 1
 fi
 
-foreground_wayland=false
+healthy_phosh=false
 for _attempt in $(seq 1 30); do
-  active_session=$(loginctl show-seat seat0 --property=ActiveSession --value 2>/dev/null || true)
-  if [[ -n "$active_session" ]] \
-    && [[ $(loginctl show-session "$active_session" --property=Type --value 2>/dev/null || true) == wayland ]]; then
-    foreground_wayland=true
+  if busctl --user --no-pager status org.gnome.Shell >/dev/null 2>&1; then
+    healthy_phosh=true
     break
   fi
   sleep 1
 done
 
-if [[ $foreground_wayland != true ]]; then
+if [[ $healthy_phosh != true ]]; then
   loginctl seat-status seat0 || true
-  systemctl status --no-pager greetd.service || true
+  systemctl status --no-pager phosh.service || true
   exit 1
 fi
 
@@ -98,4 +113,8 @@ if (( switch_status != 0 )); then
 fi
 REMOTE
 
-echo "==> Done! System is live and set as default boot target."
+if [[ $INSTALL_ONLY == true ]]; then
+  echo "==> Done! System is installed as the default boot target; live switch skipped."
+else
+  echo "==> Done! System is live and set as default boot target."
+fi

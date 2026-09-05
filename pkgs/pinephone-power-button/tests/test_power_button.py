@@ -20,6 +20,7 @@ class PowerButtonTests(unittest.TestCase):
         self.poweroffs = 0
         self.controller = power_button.ButtonController(
             self.brightness,
+            dim_brightness=0,
             lock_sessions=self.lock,
             poweroff=self.poweroff,
         )
@@ -46,6 +47,27 @@ class PowerButtonTests(unittest.TestCase):
 
         self.press(2.0, 2.1)
         self.assertEqual(self.locks, 1)
+        self.assertEqual(self.brightness.read_text().strip(), "80")
+        self.assertFalse(self.controller.blanked)
+
+    def test_default_lock_only_mode_never_writes_brightness(self):
+        controller = power_button.ButtonController(
+            self.brightness,
+            lock_sessions=self.lock,
+            poweroff=self.poweroff,
+        )
+        controller.handle(power_button.EV_KEY, power_button.KEY_POWER, 1, 1.0)
+        controller.handle(power_button.EV_KEY, power_button.KEY_POWER, 0, 1.1)
+        self.assertEqual(self.locks, 1)
+        self.assertEqual(self.brightness.read_text().strip(), "80")
+        self.assertFalse(controller.blanked)
+
+    def test_rapid_second_press_is_debounced(self):
+        self.press(1.0, 1.1)
+        self.press(1.2, 1.3)
+        self.assertEqual(self.brightness.read_text().strip(), "0")
+        self.assertTrue(self.controller.blanked)
+        self.press(2.0, 2.1)
         self.assertEqual(self.brightness.read_text().strip(), "80")
         self.assertFalse(self.controller.blanked)
 

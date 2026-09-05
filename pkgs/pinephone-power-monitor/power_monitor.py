@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
     "batteryPath": None,
     "backlightPath": None,
     "interactiveBrightness": 51,
-    "interactiveServices": ["greetd.service"],
+    "interactiveServices": ["phosh.service"],
     "sampleInterval": 30,
     "retentionDays": 30,
     "listenAddress": "127.0.0.1",
@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "warningPercent": 20,
     "powerSavePercent": 15,
     "performanceOnExternalPower": False,
+    "manageFrequencies": True,
     "criticalPercent": 8,
     "shutdownPercent": 5,
     "shutdownVoltageMicrovolts": 3_400_000,
@@ -48,7 +49,7 @@ DEFAULT_CONFIG = {
         "balanced": {
             "cpuMaxPercent": 75,
             "cpuGovernor": "schedutil",
-            "gpuMaxPercent": 100,
+            "gpuMaxPercent": 67,
             "gpuGovernor": "simple_ondemand",
         },
         "gateway": {
@@ -483,22 +484,25 @@ def apply_operating_mode(
             online_path = cpu_root / f"cpu{cpu}" / "online"
             if read_int(online_path) == 0 and write_text(online_path, 1):
                 changes.append(f"cpu{cpu}=online")
-        # Starting display services during an ordinary daemon restart races
-        # with NixOS activation, which may still be stopping the old GNOME
-        # user session. Only start them for a real headless -> interactive
-        # transition; graphical.target owns normal boot and activation starts.
-        if services and previous_mode == "headless":
-            command_runner(["systemctl", "start", *reversed(services)], check=False, timeout=30)
-            changes.append("display-services=started")
-        if brightness_path:
-            brightness = read_int(saved_brightness_path)
-            if brightness is None or brightness <= 0:
-                brightness = int(config.get("interactiveBrightness", 51))
-            maximum = read_int(backlight / "max_brightness") if backlight else None
-            if maximum is not None:
-                brightness = min(brightness, maximum)
-            if write_text(brightness_path, brightness):
-                changes.append(f"backlight={brightness}")
+        # Only the explicit headless -> interactive transition owns display
+        # state. On boot, daemon restart, or an interactive profile change,
+        # graphical.target and the power-button handler already own the
+        # compositor and backlight. Writing brightness here used to race DRM
+        # startup and could also illuminate a screen the button handler still
+        # considered blanked.
+        if previous_mode == "headless":
+            if brightness_path:
+                brightness = read_int(saved_brightness_path)
+                if brightness is None or brightness <= 0:
+                    brightness = int(config.get("interactiveBrightness", 51))
+                maximum = read_int(backlight / "max_brightness") if backlight else None
+                if maximum is not None:
+                    brightness = min(brightness, maximum)
+                if write_text(brightness_path, brightness):
+                    changes.append(f"backlight={brightness}")
+            if services:
+                command_runner(["systemctl", "start", *reversed(services)], check=False, timeout=30)
+                changes.append("display-services=started")
         operating_mode_path.write_text("interactive\n", encoding="ascii")
         os.chmod(operating_mode_path, 0o644)
     return changes
@@ -510,6 +514,20 @@ def selected_auto_profile(sample: dict[str, Any], config: dict[str, Any]) -> str
     if status == "charging" or sample.get("external_power"):
         return "performance" if config.get("performanceOnExternalPower") else "balanced"
     if capacity is not None and capacity <= config["criticalPercent"]:
+        voltage = sample.get("voltage_uv")
+        voltage_limit = config.get("shutdownVoltageMicrovolts")
+        # The RK818 can report 0% for several minutes after boot while its
+        # voltage still contradicts an empty battery. Avoid pinning every CPU
+        # to the minimum-frequency critical governor from that untrusted
+        # sample; retain conservative schedutil limits until the voltage also
+        # confirms the critical state.
+        if (
+            capacity <= config["shutdownPercent"]
+            and voltage is not None
+            and voltage_limit is not None
+            and voltage > voltage_limit
+        ):
+            return "powersave"
         return "critical"
     if capacity is not None and capacity <= config["powerSavePercent"]:
         return "powersave"
@@ -527,8 +545,16 @@ class SafetyGuard:
             return False, None
         capacity = sample.get("capacity_percent")
         voltage = sample.get("voltage_uv")
-        capacity_low = capacity is not None and capacity <= self.config["shutdownPercent"]
         voltage_limit = self.config.get("shutdownVoltageMicrovolts")
+        # The RK818 gauge sometimes reports 0% for several minutes after boot
+        # while a charged cell is still above 4 V.  Never power off from that
+        # contradictory percentage.  If voltage monitoring is configured, a
+        # low percentage must be corroborated by low voltage.
+        capacity_low = (
+            capacity is not None
+            and capacity <= self.config["shutdownPercent"]
+            and (voltage is None or voltage_limit is None or voltage <= voltage_limit)
+        )
         voltage_low = (
             voltage_limit is not None
             and voltage is not None
@@ -606,7 +632,10 @@ class Monitor:
         effective = selected_auto_profile(initial, self.config) if desired == "auto" else desired
         if effective != self.applied_profile:
             changes = apply_operating_mode(effective, self.config, self.state_dir)
-            changes.extend(apply_profile(effective, self.config))
+            if self.config.get("manageFrequencies", True):
+                changes.extend(apply_profile(effective, self.config))
+            else:
+                changes.append("frequency-management=disabled")
             self.applied_profile = effective
             self.event(f"profile={effective} requested={desired} {' '.join(changes)}")
         sample = collect_sample(self.config, effective)

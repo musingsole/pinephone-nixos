@@ -4,33 +4,40 @@ This guide provides instructions for configuring, building, and flashing a Mobil
 
 ## Battery monitoring and power profiles
 
-The local configuration enables `pinephone.power`, which samples the RK818
-fuel gauge every 30 seconds and retains 30 days of history. Open **Battery
-Monitor** from Phosh to see charge, battery-flow watts, voltage, temperature,
-learned capacity, estimated runtime, and CPU/GPU frequencies. The same data is
-available at `http://127.0.0.1:9095/` and as CSV in
-`/var/lib/pinephone-power-monitor/samples.csv`.
+The `pinephone.power` module can sample the RK818 fuel gauge and retain battery
+history, but it is disabled in the stability image so it adds no services or
+CPU/GPU policy writes to the generation-24 boot graph. Re-enable it only as an
+isolated follow-up test after repeated boot and cable-transition testing.
 
 Battery-flow watts are derived from the kernel's simultaneous `voltage_now`
 and `current_now` readings because the RK818 driver does not export
 `power_now`. Positive values are discharge and negative values are charging;
 while plugged in this is net battery flow, not total wall power.
 
-Phosh is launched unchanged through `greetd`, which creates the foreground
-PAM/logind session before starting the compositor. This lets the stock
-brightness slider use logind normally; no Phosh source patch or writable
-backlight sysfs rule is used.
+Phosh is launched through Mobile NixOS's direct `phosh.service` with seatd.
+This is the same display-service topology as the last repeatedly bootable
+image. A small post-start service marks its existing tty1 Wayland session active
+in logind so the stock quick-settings brightness slider is authorized; no Phosh
+source patch or writable backlight sysfs rule is used.
+
+Set `headlessDiagnostic = true` near the top of `local.nix` to suppress the
+Phosh/phoc session while retaining SSH, networking, modem support, and
+power telemetry. This provides an A/B stability test that does not submit work
+to Panfrost or tear down the DRM session at runtime. It is `false` by default.
 
 The power button is handled by a small exclusive input service because native
 DRM DPMS wake can hard-lock the PinePhone Pro's RK3399 DSI/VOP pipeline. A short
-press locks through logind and turns off only the panel backlight; the compositor
-and display pipeline remain active. The next short press restores the saved
-brightness and leaves the lock screen in place for normal authentication. A
-three-second press requests an orderly poweroff.
+press locks through logind and writes panel brightness to 0 while leaving Phoc
+and the DRM pipeline active. The next accepted press restores the saved
+brightness. A 1.25-second debounce blocks the rapid off/on pairs found in the
+failed-generation journals. A three-second press requests an orderly poweroff.
 
-The default `auto` policy uses demand-driven balanced operation (also while
-charging, to limit heat), powersave at 15%, and critical at 8%. The balanced
-GPU can still reach 600 MHz when demanded. Inspect or override the policy with:
+The mobile Chromium wrapper disables GPU compositing. GPU startup otherwise
+matches generation 24's single performance-governor write; no adaptive profile
+daemon changes devfreq while Phoc opens the DRM devices.
+
+When the optional monitor is enabled, its default `auto` policy uses balanced
+operation, powersave at 15%, and critical at 8%. Inspect or override it with:
 
 ```console
 $ power-profile status
@@ -41,10 +48,9 @@ $ sudo power-profile performance
 $ sudo power-profile auto
 ```
 
-`gateway` is a reversible headless mode for PAN operation. It stops the
-greetd-managed Phosh session, saves and turns off the backlight, offlines the
-two RK3399 big cores, and caps the four little cores at their supported 816 MHz
-step. Bluetooth, Wi-Fi, USB host mode, the EG25 modem, NetworkManager,
+The optional `gateway` profile is a reversible headless mode. It stops the direct
+Phosh session, saves and turns off the backlight, and offlines the two RK3399
+big cores. Bluetooth, Wi-Fi, USB host mode, the EG25 modem, NetworkManager,
 ModemManager, SSH, Renurd, forwarding, and the firewall remain available.
 Selecting `balanced`, `performance`, or `auto` on the next SSH command restores
 both big cores, the interactive services, and the saved screen brightness.
@@ -190,27 +196,9 @@ in
   systemd.targets.hybrid-sleep.enable = false;
   systemd.targets.suspend-then-hibernate.enable = false;
 
-  # ---------------------------------------------------------------------------
-  # USB Host Mode (Enable USB Keyboards, Mice, and USB-C Hubs)
-  # ---------------------------------------------------------------------------
-  systemd.services.enable-usb-host-mode = {
-    description = "Enable USB Type-C Host Mode for Keyboards and Hubs";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "enable-usb-host" ''
-        for u in /sys/kernel/config/usb_gadget/*/UDC; do
-          if [ -f "$u" ]; then
-            echo "" > "$u" 2>/dev/null || true
-          fi
-        done
-        if [ -f /sys/class/usb_role/fe800000.usb-role-switch/role ]; then
-          echo host > /sys/class/usb_role/fe800000.usb-role-switch/role 2>/dev/null || true
-        fi
-      '';
-    };
-  };
+  # Leave USB-C data and power roles under the Type-C controller. Forcing the
+  # DWC3 role to host while a charger negotiates device mode can stall the
+  # phone when the cable is removed.
 
   # ---------------------------------------------------------------------------
   # Desktop Schemas & DConf (For On-Screen Keyboard & GNOME Settings)

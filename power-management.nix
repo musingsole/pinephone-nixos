@@ -45,6 +45,7 @@ let
       interactiveBrightness
       interactiveServices
       listenAddress
+      manageFrequencies
       port
       performanceOnExternalPower
       powerSavePercent
@@ -85,7 +86,7 @@ in
 
     interactiveServices = mkOption {
       type = types.listOf types.str;
-      default = [ "greetd.service" ];
+      default = [ "phosh.service" ];
       description = "Services stopped in headless profiles and started in interactive profiles.";
     };
 
@@ -134,6 +135,16 @@ in
       '';
     };
 
+    manageFrequencies = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether profile changes write CPU cpufreq and GPU devfreq controls.
+        Disable this to retain telemetry and safety protection without changing
+        performance policy during display-server startup.
+      '';
+    };
+
     criticalPercent = mkOption {
       type = types.ints.between 1 100;
       default = 8;
@@ -143,7 +154,11 @@ in
     shutdownPercent = mkOption {
       type = types.ints.between 1 100;
       default = 5;
-      description = "Discharging capacity at which an orderly poweroff is requested.";
+      description = ''
+        Discharging capacity at which an orderly poweroff is requested. When
+        voltage shutdown is configured, low voltage must corroborate this
+        percentage so transient RK818 0% readings cannot cause a boot loop.
+      '';
     };
 
     shutdownVoltageMicrovolts = mkOption {
@@ -186,7 +201,9 @@ in
         balanced = {
           cpuMaxPercent = 75;
           cpuGovernor = "schedutil";
-          gpuMaxPercent = 100;
+          # 67% selects the RK3399 GPU's exact 400 MHz OPP.  Higher Panfrost
+          # clocks have coincided with unrecoverable UI/system stalls.
+          gpuMaxPercent = 67;
           gpuGovernor = "simple_ondemand";
         };
         gateway = {

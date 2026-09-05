@@ -2,16 +2,9 @@
 
 let
   defaultUser = "pine";
-
-  # Let a display manager create the PAM/logind session and own the active VT.
-  # Phosh itself remains the unmodified Nixpkgs package.
-  phoshSession = pkgs.writeShellScript "start-phosh-session" ''
-    export XDG_CURRENT_DESKTOP="Phosh:GNOME"
-    export XDG_SESSION_DESKTOP="phosh"
-    export XDG_SESSION_TYPE="wayland"
-    export WLR_DRM_DEVICES="/dev/dri/card1:/dev/dri/card0"
-    exec ${lib.getExe config.services.xserver.desktopManager.phosh.package}
-  '';
+  # Set true for an A/B diagnostic that keeps the phone/network stack running
+  # without starting Phosh/phoc or exercising Panfrost from userspace.
+  headlessDiagnostic = false;
 
   powerButtonPackage = pkgs.callPackage ./pkgs/pinephone-power-button { };
 
@@ -35,6 +28,8 @@ let
     makeWrapper ${pkgs.chromium}/bin/chromium $out/bin/chromium \
       --add-flags "--ozone-platform=wayland" \
       --add-flags "--enable-features=UseOzonePlatform" \
+      --add-flags "--disable-gpu" \
+      --add-flags "--disable-gpu-compositing" \
       --add-flags "--user-agent=\"Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36\""
 
     # Desktop entry targeting mobile form factors and Wayland WM class
@@ -265,11 +260,11 @@ in
     ./power-management.nix
   ];
 
-  # Persistent fuel-gauge telemetry, a local graph, adaptive CPU/GPU profiles,
-  # and an orderly shutdown before an aging battery reaches an unstable state.
+  # Keep the post-generation-24 adaptive power daemon out of the boot graph.
+  # Its implementation remains available for later isolated testing, but the
+  # stability image deliberately matches the known-good service topology.
   pinephone.power = {
-    enable = true;
-    defaultProfile = "auto";
+    enable = false;
   };
 
   # ---------------------------------------------------------------------------
@@ -311,6 +306,7 @@ in
       "audio"
       "feedbackd"
       "dialout"
+      "seat"
       "tty"
     ];
     openssh.authorizedKeys.keys = [
@@ -322,34 +318,40 @@ in
   # ---------------------------------------------------------------------------
   # Graphical Login / Seat Ownership
   # ---------------------------------------------------------------------------
-  # The Mobile NixOS Phosh module's direct system service can run on tty1 while
-  # logind considers another VT foreground. In that state logind rejects the
-  # stock Phosh brightness request with NotYourDevice. Greetd performs the VT
-  # activation and PAM login before launching the unchanged Phosh session.
-  systemd.services.phosh.enable = false;
-  services.greetd = {
-    enable = true;
-    settings = {
-      initial_session = {
-        command = toString phoshSession;
-        user = defaultUser;
-      };
-      default_session = {
-        command = "${lib.getExe' pkgs.greetd "agreety"} --cmd ${phoshSession}";
-        user = "greeter";
-      };
+  # Use the Mobile NixOS direct Phosh service and seatd topology from the last
+  # repeatedly bootable image. The greetd path intermittently stopped between
+  # session creation and Phoc becoming ready after the charger-triggered hang.
+  services.seatd.enable = true;
+  systemd.services.phosh = {
+    enable = !headlessDiagnostic;
+    environment = {
+      LIBSEAT_BACKEND = "seatd";
+      WLR_DRM_DEVICES = "/dev/dri/card1:/dev/dri/card0";
     };
   };
-  systemd.services.greetd = {
-    wants = [ "systemd-logind.service" "pinephone-power-button.service" ];
-    after = [ "systemd-logind.service" "pinephone-power-button.service" ];
+
+  # The direct system service reliably boots, but seatd's VT acquisition does
+  # not tell logind that the PAM-created Wayland session is foreground. Phosh's
+  # brightness slider then receives login1.NotYourDevice. Activate the already
+  # running tty1 session immediately after phosh.service starts; this does not
+  # restart or otherwise reconfigure the compositor.
+  systemd.services.phosh-activate-session = lib.mkIf (!headlessDiagnostic) {
+    description = "Mark the direct Phosh session active in logind";
+    wantedBy = [ "graphical.target" ];
+    after = [ "phosh.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.systemd}/bin/loginctl activate 1";
+      Restart = "on-failure";
+      RestartSec = 0.2;
+    };
   };
 
   # ---------------------------------------------------------------------------
   # Power Management & Screen Blanking (Fix Power Button Sleep / Wakeup)
   # ---------------------------------------------------------------------------
   # On PinePhone Pro (RK3399), deep kernel suspend (mem) breaks wake IRQs.
-  # Instead, lock and turn off screen backlight on power button press.
+  # Keep the display pipeline active and blank only the panel backlight.
   services.logind.settings.Login = {
     HandlePowerKey = "ignore";
     HandlePowerKeyLongPress = "poweroff";
@@ -364,25 +366,23 @@ in
   systemd.targets.suspend-then-hibernate.enable = false;
 
   # Native Phosh DPMS wake can hard-lock this device's RK3399 DSI/VOP pipeline.
-  # Exclusively grab KEY_POWER so Phosh cannot enter DPMS, lock through logind,
-  # and turn off only the panel backlight. The compositor and DRM pipeline stay
-  # active, avoiding the failing hardware power-cycle while the screen is dark.
+  # Exclusively grab KEY_POWER so Phosh cannot enter DPMS. A short press locks
+  # through logind and writes backlight brightness 0; the next accepted press
+  # restores the saved level. Debouncing prevents the rapid off/on pairs seen
+  # in journals while the compositor and DRM pipeline remain continuously on.
   systemd.services.pinephone-power-button = {
     description = "PinePhone Pro Backlight-Only Power Button";
     wantedBy = [ "multi-user.target" ];
     wants = [ "systemd-logind.service" ];
     after = [ "systemd-logind.service" ];
-    before = [ "greetd.service" ];
     serviceConfig = {
-      ExecStart = "${powerButtonPackage}/bin/pinephone-power-button --fallback-brightness 51";
+      ExecStart = "${powerButtonPackage}/bin/pinephone-power-button --fallback-brightness 51 --dim-brightness 0 --debounce-seconds 1.25";
       Restart = "always";
       RestartSec = 1;
     };
   };
 
-  # ---------------------------------------------------------------------------
-  # USB Host Mode (Enable USB Keyboards, Mice, and USB-C Hubs)
-  # ---------------------------------------------------------------------------
+  # Match generation 24's known-good DWC3 host-role setup exactly.
   systemd.services.enable-usb-host-mode = {
     description = "Enable USB Type-C Host Mode for Keyboards and Hubs";
     wantedBy = [ "multi-user.target" ];
@@ -407,6 +407,24 @@ in
     };
   };
 
+  # Match generation 24's known-good GPU startup policy. Unlike the adaptive
+  # monitor, this is a single boot-time governor write and never races later
+  # profile transitions against Phoc.
+  systemd.services.gpu-performance = {
+    description = "Set Mali-T860 GPU to performance governor";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "gpu-perf" ''
+        echo performance > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
+      '';
+      ExecStop = pkgs.writeShellScript "gpu-ondemand" ''
+        echo simple_ondemand > /sys/class/devfreq/ff9a0000.gpu/governor 2>/dev/null || true
+      '';
+    };
+  };
+
   # ---------------------------------------------------------------------------
   # Desktop Schemas & DConf (For On-Screen Keyboard & GNOME Settings)
   # ---------------------------------------------------------------------------
@@ -417,7 +435,13 @@ in
         # Phosh's package default is 60 seconds, and an older writable user
         # value can otherwise override this database.  Lock the setting so
         # Phosh never asks the unreliable RK3399 DSI/VOP path to enter DPMS.
-        locks = [ "/org/gnome/desktop/session/idle-delay" ];
+        locks = [
+          "/org/gnome/desktop/session/idle-delay"
+          "/org/gnome/settings-daemon/plugins/power/idle-dim"
+          "/org/gnome/settings-daemon/plugins/power/power-button-action"
+          "/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type"
+          "/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type"
+        ];
         settings = {
           "org/gnome/settings-daemon/plugins/media-keys" = {
             power = lib.gvariant.mkEmptyArray "s";

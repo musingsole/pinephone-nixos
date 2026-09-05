@@ -3,6 +3,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "power_monitor.py"
@@ -74,12 +75,25 @@ class PowerMonitorTests(unittest.TestCase):
         config = dict(power_monitor.DEFAULT_CONFIG)
         config.update({"shutdownPercent": 5, "shutdownConfirmations": 3})
         guard = power_monitor.SafetyGuard(config)
-        low = {"status": "Discharging", "external_power": False, "capacity_percent": 4, "voltage_uv": 3_500_000}
+        low = {"status": "Discharging", "external_power": False, "capacity_percent": 4, "voltage_uv": 3_300_000}
         self.assertFalse(guard.check(low)[0])
         self.assertFalse(guard.check(low)[0])
         self.assertTrue(guard.check(low)[0])
         low["external_power"] = True
         self.assertFalse(guard.check(low)[0])
+        self.assertEqual(guard.unsafe_count, 0)
+
+    def test_safety_rejects_false_empty_gauge_at_charged_voltage(self):
+        config = dict(power_monitor.DEFAULT_CONFIG)
+        guard = power_monitor.SafetyGuard(config)
+        false_empty = {
+            "status": "Discharging",
+            "external_power": False,
+            "capacity_percent": 0,
+            "voltage_uv": 4_126_000,
+        }
+        for _ in range(config["shutdownConfirmations"] + 2):
+            self.assertFalse(guard.check(false_empty)[0])
         self.assertEqual(guard.unsafe_count, 0)
 
     def test_auto_profile_thresholds(self):
@@ -88,6 +102,18 @@ class PowerMonitorTests(unittest.TestCase):
         self.assertEqual(power_monitor.selected_auto_profile({"status": "Discharging", "capacity_percent": 7}, config), "critical")
         self.assertEqual(power_monitor.selected_auto_profile({"status": "Discharging", "capacity_percent": 12}, config), "powersave")
         self.assertEqual(power_monitor.selected_auto_profile({"status": "Discharging", "capacity_percent": 60}, config), "balanced")
+
+    def test_auto_profile_rejects_false_empty_gauge_at_charged_voltage(self):
+        config = power_monitor.DEFAULT_CONFIG
+        false_empty = {
+            "status": "Discharging",
+            "external_power": False,
+            "capacity_percent": 0,
+            "voltage_uv": 4_126_000,
+        }
+        self.assertEqual(power_monitor.selected_auto_profile(false_empty, config), "powersave")
+        false_empty["voltage_uv"] = 3_300_000
+        self.assertEqual(power_monitor.selected_auto_profile(false_empty, config), "critical")
 
     def test_profile_uses_supported_frequency_steps(self):
         put(self.cpu, "policy0/cpuinfo_min_freq", 408_000)
@@ -109,7 +135,7 @@ class PowerMonitorTests(unittest.TestCase):
         )
         self.assertEqual((self.cpu / "policy0/scaling_max_freq").read_text().strip(), "600000")
         self.assertEqual((self.cpu / "policy0/scaling_governor").read_text().strip(), "schedutil")
-        self.assertEqual((self.gpu / "ff9a0000.gpu/max_freq").read_text().strip(), "600000000")
+        self.assertEqual((self.gpu / "ff9a0000.gpu/max_freq").read_text().strip(), "400000000")
 
         power_monitor.apply_profile(
             "gateway", power_monitor.DEFAULT_CONFIG,
@@ -140,7 +166,7 @@ class PowerMonitorTests(unittest.TestCase):
         self.assertEqual((cpu_root / "cpu4/online").read_text().strip(), "0")
         self.assertEqual((cpu_root / "cpu5/online").read_text().strip(), "0")
         self.assertEqual((cpu_root / "cpu3/online").read_text().strip(), "1")
-        self.assertEqual(commands[0], ["systemctl", "stop", "greetd.service"])
+        self.assertEqual(commands[0], ["systemctl", "stop", "phosh.service"])
         self.assertNotIn("bluetooth.service", " ".join(commands[0]))
         self.assertIn("backlight=0", changes)
 
@@ -151,23 +177,52 @@ class PowerMonitorTests(unittest.TestCase):
         self.assertEqual((cpu_root / "cpu4/online").read_text().strip(), "1")
         self.assertEqual((cpu_root / "cpu5/online").read_text().strip(), "1")
         self.assertEqual((backlight_root / "panel/brightness").read_text().strip(), "37")
-        self.assertEqual(commands[-1], ["systemctl", "start", "greetd.service"])
+        self.assertEqual(commands[-1], ["systemctl", "start", "phosh.service"])
 
     def test_interactive_startup_does_not_race_display_manager(self):
         config = json.loads(json.dumps(power_monitor.DEFAULT_CONFIG))
         state = self.root / "fresh-state"
         state.mkdir()
+        backlight_root = self.root / "fresh-backlight"
+        put(backlight_root, "panel/brightness", 23)
+        put(backlight_root, "panel/max_brightness", 51)
         commands = []
 
         power_monitor.apply_operating_mode(
             "balanced", config, state,
             cpu_root=self.root / "fresh-cpu",
-            backlight_root=self.root / "fresh-backlight",
+            backlight_root=backlight_root,
             command_runner=lambda command, **_kwargs: commands.append(command),
         )
 
         self.assertEqual(commands, [])
+        self.assertEqual((backlight_root / "panel/brightness").read_text().strip(), "23")
         self.assertEqual((state / "operating_mode").read_text().strip(), "interactive")
+
+    def test_cycle_can_collect_without_rewriting_frequency_policy(self):
+        config = json.loads(json.dumps(power_monitor.DEFAULT_CONFIG))
+        config["manageFrequencies"] = False
+        config["interactiveServices"] = []
+        state = self.root / "monitor-state"
+        sample = {
+            "status": "Discharging",
+            "external_power": False,
+            "capacity_percent": 42,
+            "voltage_uv": 3_900_000,
+            "power_uw": 500_000,
+            "profile": "balanced",
+        }
+        monitor = power_monitor.Monitor(config, state)
+
+        with (
+            mock.patch.object(power_monitor, "collect_sample", return_value=sample.copy()),
+            mock.patch.object(power_monitor, "apply_operating_mode", return_value=[]),
+            mock.patch.object(power_monitor, "apply_profile") as apply_profile,
+        ):
+            result = monitor.cycle()
+
+        apply_profile.assert_not_called()
+        self.assertEqual(result["profile"], "balanced")
 
 
 if __name__ == "__main__":

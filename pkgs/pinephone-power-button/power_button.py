@@ -50,19 +50,24 @@ class ButtonController:
         brightness_path: pathlib.Path,
         *,
         fallback_brightness: int = 51,
+        dim_brightness: int | None = None,
+        debounce_seconds: float = 0.75,
         long_press_seconds: float = 3.0,
         lock_sessions: Callable[[], bool],
         poweroff: Callable[[], None],
     ) -> None:
         self.brightness_path = brightness_path
         self.fallback_brightness = fallback_brightness
+        self.dim_brightness = dim_brightness
+        self.debounce_seconds = debounce_seconds
         self.long_press_seconds = long_press_seconds
         self.lock_sessions = lock_sessions
         self.poweroff = poweroff
         current = read_int(brightness_path)
-        self.blanked = current == 0
+        self.blanked = dim_brightness is not None and current == dim_brightness
         self.saved_brightness = current if current and current > 0 else fallback_brightness
         self.press_started: float | None = None
+        self.last_action_at: float | None = None
 
     def handle(self, event_type: int, code: int, value: int, now: float) -> None:
         if event_type != EV_KEY or code != KEY_POWER:
@@ -76,9 +81,20 @@ class ButtonController:
 
         duration = now - self.press_started
         self.press_started = None
+        if (
+            self.last_action_at is not None
+            and now - self.last_action_at < self.debounce_seconds
+        ):
+            return
+        self.last_action_at = now
         if duration >= self.long_press_seconds:
             print(f"power-button: orderly poweroff after {duration:.1f}s press", flush=True)
             self.poweroff()
+        elif self.dim_brightness is None:
+            if self.lock_sessions():
+                print("power-button: session locked; display left on", flush=True)
+            else:
+                print("power-button: lock request failed; leaving display on", flush=True)
         elif self.blanked:
             if write_int(self.brightness_path, self.saved_brightness):
                 self.blanked = False
@@ -90,9 +106,13 @@ class ButtonController:
             if not self.lock_sessions():
                 print("power-button: lock request failed; leaving display on", flush=True)
                 return
-            if write_int(self.brightness_path, 0):
+            if write_int(self.brightness_path, self.dim_brightness):
                 self.blanked = True
-                print("power-button: session locked; backlight off (DRM remains on)", flush=True)
+                print(
+                    f"power-button: session locked; backlight dimmed to {self.dim_brightness} "
+                    "(DRM remains on)",
+                    flush=True,
+                )
 
 
 def command_succeeds(command: list[str]) -> bool:
@@ -120,6 +140,8 @@ def run(args: argparse.Namespace) -> None:
     controller = ButtonController(
         brightness_path,
         fallback_brightness=args.fallback_brightness,
+        dim_brightness=args.dim_brightness,
+        debounce_seconds=args.debounce_seconds,
         long_press_seconds=args.long_press_seconds,
         lock_sessions=lambda: command_succeeds(["loginctl", "lock-sessions"]),
         poweroff=lambda: command_succeeds(["systemctl", "poweroff", "--no-wall"]),
@@ -130,9 +152,17 @@ def run(args: argparse.Namespace) -> None:
         try:
             fd = os.open(args.input_device, os.O_RDONLY)
             fcntl.ioctl(fd, EVIOCGRAB, 1)
+            mode = (
+                (
+                    "backlight-only blanking"
+                    if args.dim_brightness == 0
+                    else f"minimum-brightness dimming ({args.dim_brightness})"
+                )
+                if args.dim_brightness is not None
+                else "lock-only mode"
+            )
             print(
-                f"power-button: exclusively grabbed {args.input_device}; "
-                "using backlight-only blanking",
+                f"power-button: exclusively grabbed {args.input_device}; using {mode}",
                 flush=True,
             )
             while True:
@@ -160,8 +190,20 @@ def main() -> None:
     )
     parser.add_argument("--backlight-root", default="/sys/class/backlight")
     parser.add_argument("--fallback-brightness", type=int, default=51)
+    parser.add_argument(
+        "--dim-brightness",
+        type=int,
+        default=None,
+        help="opt in to backlight-only blanking/dimming at this brightness",
+    )
+    parser.add_argument("--debounce-seconds", type=float, default=0.75)
     parser.add_argument("--long-press-seconds", type=float, default=3.0)
-    run(parser.parse_args())
+    args = parser.parse_args()
+    if args.dim_brightness is not None and args.dim_brightness < 0:
+        parser.error("--dim-brightness cannot be negative")
+    if args.debounce_seconds < 0:
+        parser.error("--debounce-seconds cannot be negative")
+    run(args)
 
 
 if __name__ == "__main__":
