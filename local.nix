@@ -387,33 +387,75 @@ in
     };
   };
 
-  # Let the Type-C controller select device/charger/host role from cable state.
-  # Forcing xHCI host mode after typec-extcon selected the charger/device role
-  # tears down and rebinds DWC3 while VBUS is changing; cable reattachment has
-  # produced a spurious RK818 low-voltage IRQ followed by a hard system lock.
-  # USB host peripherals can be restored later with a role-aware helper.
-  systemd.services.enable-usb-host-mode = {
-    enable = false;
-    description = "Enable USB Type-C Host Mode for Keyboards and Hubs";
+  # The vendor kernel exposes separate Type-C and DWC3 role switches, but does
+  # not propagate typec-extcon role changes to DWC3.  Mirror only the role that
+  # Type-C has already negotiated.  In particular, never force host mode while
+  # Type-C says device: that older boot-time approach raced charger negotiation
+  # and could hard-lock the phone during DWC3 unbind/rebind.
+  systemd.services.pinephone-usb-role-sync = {
+    description = "Synchronize PinePhone Pro Type-C and DWC3 USB Roles";
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "enable-usb-host" ''
-        for u in /sys/kernel/config/usb_gadget/*/UDC; do
-          if [ -f "$u" ]; then
-            echo "" > "$u" 2>/dev/null || true
+      Type = "simple";
+      ExecStart = pkgs.writeShellScript "pinephone-usb-role-sync" ''
+        typec_role=/sys/class/typec/port0/data_role
+        extcon_state=/sys/class/extcon/extcon1/state
+        dwc3_role=/sys/class/usb_role/fe800000.usb-role-switch/role
+
+        get_desired_role() {
+          negotiated="$(${pkgs.coreutils}/bin/cat "$typec_role" 2>/dev/null || true)"
+
+          if [ "$negotiated" = "[host] device" ] \
+            && ${pkgs.gnugrep}/bin/grep -qx 'USB-HOST=1' "$extcon_state"; then
+            printf host
+          elif [ "$negotiated" = "host [device]" ] \
+            && ${pkgs.gnugrep}/bin/grep -qx 'USB=1' "$extcon_state"; then
+            printf device
+          else
+            return 1
           fi
+        }
+
+        sync_role() {
+          if [ ! -r "$typec_role" ] || [ ! -r "$extcon_state" ] || [ ! -r "$dwc3_role" ]; then
+            return
+          fi
+
+          desired="$(get_desired_role || true)"
+          if [ -z "$desired" ]; then
+            return
+          fi
+
+          current="$(${pkgs.coreutils}/bin/cat "$dwc3_role" 2>/dev/null || true)"
+          if [ "$current" != "$desired" ]; then
+            if [ "$desired" = host ]; then
+              for udc in /sys/kernel/config/usb_gadget/*/UDC; do
+                [ -f "$udc" ] || continue
+                printf '\n' > "$udc" 2>/dev/null || true
+              done
+
+            fi
+
+            # Recheck both Type-C and extcon after releasing gadget mode so a
+            # detach or role swap cannot turn this into a stale role write.
+            [ "$(get_desired_role || true)" = "$desired" ] || return
+
+            if printf '%s' "$desired" > "$dwc3_role"; then
+              echo "Synchronized DWC3 USB role: $current -> $desired"
+            else
+              echo "Failed to synchronize DWC3 USB role to $desired" >&2
+            fi
+          fi
+        }
+
+        sync_role
+        ${pkgs.systemd}/bin/udevadm monitor --kernel --subsystem-match=extcon |
+        while IFS= read -r _event; do
+          sync_role
         done
-        if [ -f /sys/class/usb_role/fe800000.usb-role-switch/role ]; then
-          echo host > /sys/class/usb_role/fe800000.usb-role-switch/role 2>/dev/null || true
-        fi
-        if [ -d /sys/bus/platform/drivers/dwc3 ]; then
-          echo fe800000.usb > /sys/bus/platform/drivers/dwc3/unbind 2>/dev/null || true
-          sleep 0.5
-          echo fe800000.usb > /sys/bus/platform/drivers/dwc3/bind 2>/dev/null || true
-        fi
       '';
+      Restart = "always";
+      RestartSec = 1;
     };
   };
 
