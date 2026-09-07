@@ -24,13 +24,13 @@
       # Wifi
       WLAN = yes;
       WLAN_VENDOR_BROADCOM = yes;
-      BRCMUTIL = yes;
-      BRCMFMAC = yes;
+      BRCMUTIL = module;
+      BRCMFMAC = module;
       BRCMFMAC_SDIO = yes;
-      BRCMSMAC = yes;
+      BRCMSMAC = module;
       BRCM_TRACING = yes;
       BRCMDBG = yes;
-      MAC80211 = yes;
+      MAC80211 = module;
 
       # Sensors
       STK3310 = yes; # Light sensor
@@ -52,7 +52,6 @@
       SOUND = yes;
       SND = yes;
       SND_SOC = yes;
-      SND_SOC_ROCKCHIP = yes;
       SND_SOC_ROCKCHIP_I2S = yes;
       SND_SOC_RL6231 = yes;
       SND_SOC_RT5640 = yes;
@@ -61,10 +60,10 @@
       SND_AUDIO_GRAPH_CARD = yes;
 
       # Camera Sensors & Lens Actuators (DW9714 VCM, OV8858 front, IMX258 rear, Rockchip ISP1)
-      VIDEO_IMX258 = yes;
-      VIDEO_OV8858 = yes;
-      VIDEO_DW9714 = yes;
-      VIDEO_ROCKCHIP_ISP1 = yes;
+      VIDEO_IMX258 = module;
+      VIDEO_OV8858 = module;
+      VIDEO_DW9714 = module;
+      VIDEO_ROCKCHIP_ISP1 = module;
     })
   ];
 }

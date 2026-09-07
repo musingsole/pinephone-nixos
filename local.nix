@@ -387,78 +387,6 @@ in
     };
   };
 
-  # The vendor kernel exposes separate Type-C and DWC3 role switches, but does
-  # not propagate typec-extcon role changes to DWC3.  Mirror only the role that
-  # Type-C has already negotiated.  In particular, never force host mode while
-  # Type-C says device: that older boot-time approach raced charger negotiation
-  # and could hard-lock the phone during DWC3 unbind/rebind.
-  systemd.services.pinephone-usb-role-sync = {
-    description = "Synchronize PinePhone Pro Type-C and DWC3 USB Roles";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      Type = "simple";
-      ExecStart = pkgs.writeShellScript "pinephone-usb-role-sync" ''
-        typec_role=/sys/class/typec/port0/data_role
-        extcon_state=/sys/class/extcon/extcon1/state
-        dwc3_role=/sys/class/usb_role/fe800000.usb-role-switch/role
-
-        get_desired_role() {
-          negotiated="$(${pkgs.coreutils}/bin/cat "$typec_role" 2>/dev/null || true)"
-
-          if [ "$negotiated" = "[host] device" ] \
-            && ${pkgs.gnugrep}/bin/grep -qx 'USB-HOST=1' "$extcon_state"; then
-            printf host
-          elif [ "$negotiated" = "host [device]" ] \
-            && ${pkgs.gnugrep}/bin/grep -qx 'USB=1' "$extcon_state"; then
-            printf device
-          else
-            return 1
-          fi
-        }
-
-        sync_role() {
-          if [ ! -r "$typec_role" ] || [ ! -r "$extcon_state" ] || [ ! -r "$dwc3_role" ]; then
-            return
-          fi
-
-          desired="$(get_desired_role || true)"
-          if [ -z "$desired" ]; then
-            return
-          fi
-
-          current="$(${pkgs.coreutils}/bin/cat "$dwc3_role" 2>/dev/null || true)"
-          if [ "$current" != "$desired" ]; then
-            if [ "$desired" = host ]; then
-              for udc in /sys/kernel/config/usb_gadget/*/UDC; do
-                [ -f "$udc" ] || continue
-                printf '\n' > "$udc" 2>/dev/null || true
-              done
-
-            fi
-
-            # Recheck both Type-C and extcon after releasing gadget mode so a
-            # detach or role swap cannot turn this into a stale role write.
-            [ "$(get_desired_role || true)" = "$desired" ] || return
-
-            if printf '%s' "$desired" > "$dwc3_role"; then
-              echo "Synchronized DWC3 USB role: $current -> $desired"
-            else
-              echo "Failed to synchronize DWC3 USB role to $desired" >&2
-            fi
-          fi
-        }
-
-        sync_role
-        ${pkgs.systemd}/bin/udevadm monitor --kernel --subsystem-match=extcon |
-        while IFS= read -r _event; do
-          sync_role
-        done
-      '';
-      Restart = "always";
-      RestartSec = 1;
-    };
-  };
-
   # Match generation 24's known-good GPU startup policy. Unlike the adaptive
   # monitor, this is a single boot-time governor write and never races later
   # profile transitions against Phoc.
@@ -1054,6 +982,36 @@ in
           "-Dgtk_doc=false"
         ];
       });
+
+      # Phoc 0.57 contains the renderer-loss and Cairo-texture recovery fixes
+      # needed when a DisplayPort sink appears or disappears.  Its package
+      # expression still calls the compositor input `wlroots_0_19`, so replace
+      # that input with the matching wlroots 0.20.2 release.
+      phoc = (super.phoc.override {
+        wlroots_0_19 = final.wlroots_0_20.overrideAttrs (_: {
+          version = "0.20.2";
+          src = final.fetchFromGitLab {
+            domain = "gitlab.freedesktop.org";
+            owner = "wlroots";
+            repo = "wlroots";
+            rev = "0.20.2";
+            hash = "sha256-VdYymvzYp6/R255AK20j4xTd+JbCZgNiRfgeRJD+UZY=";
+          };
+        });
+      }).overrideAttrs (_: {
+        version = "0.57.0";
+        src = final.fetchFromGitLab {
+          domain = "gitlab.gnome.org";
+          group = "World";
+          owner = "Phosh";
+          repo = "phoc";
+          tag = "v0.57.0";
+          hash = "sha256-DPRQxPpWnIlJPTGuXYHAYFYA28QWav0g3HVfgT0ugOo=";
+        };
+      });
+
+      # Phosh bakes the absolute Phoc path into its session definition.
+      phosh = super.phosh.override { phoc = final.phoc; };
 
       epiphany = super.emptyDirectory;
     })
