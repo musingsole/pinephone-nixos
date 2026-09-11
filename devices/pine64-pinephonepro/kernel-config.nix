@@ -48,6 +48,11 @@
       # Vibrate motor
       INPUT_GPIO_VIBRA = yes;
 
+      # The optional ARM64 implementation is assembled with crypto extension
+      # instructions even when Nix's generic GCC target does not enable them.
+      # Keep the portable AEGIS128 implementation and omit only its SIMD path.
+      CRYPTO_AEGIS128_SIMD = no;
+
       # Audio (Realtek RT5640 Codec, ES8316 Codec, Rockchip I2S & Sound Cards)
       SOUND = yes;
       SND = yes;

@@ -24,6 +24,11 @@
     kernel.package = pkgs.callPackage ./kernel { };
   };
 
+  # The U-Boot filesystem contains the kernel and DTBs twice: once for normal
+  # boot and once for recovery.  Linux 7.2's DTB set no longer fits in the
+  # generic 128 MiB default, so leave enough room for this and future updates.
+  mobile.generatedFilesystems.boot.size = lib.mkForce (pkgs.image-builder.helpers.size.MiB 256);
+
   boot.kernelParams = [
     "earlycon=uart8250,mmio32,0xff1a0000"
   ];

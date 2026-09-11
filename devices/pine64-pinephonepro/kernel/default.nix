@@ -1,6 +1,7 @@
 {
   mobile-nixos,
   fetchzip,
+  zstd,
   ...
 }:
 
@@ -118,6 +119,9 @@ mobile-nixos.kernel-builder {
   patches =
     map (name: "${pinephoneProDir}/megi_patches/${name}") patchNames
     ++ [ "${pinephoneProDir}/0001-arm64-dts-rk3399-pinephone-pro-Keep-modem-regulators.patch" ];
+
+  # The pmaports configuration compresses installed modules with Zstandard.
+  nativeBuildInputs = [ zstd ];
 
   postInstall = ''
     echo ":: Installing FDTs"
