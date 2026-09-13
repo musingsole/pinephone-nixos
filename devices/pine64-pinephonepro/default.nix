@@ -1,5 +1,25 @@
 { config, lib, pkgs, ... }:
 
+let
+  kernel = pkgs.callPackage ./kernel { };
+
+  # The external pmaports config installs compressed modules but does not
+  # generate the indexes modprobe needs.  Add them without rebuilding the
+  # kernel itself; makeModulesClosure will consume this modules output while
+  # the boot image continues to use the original kernel output.
+  indexedKernelModules = pkgs.runCommand "${kernel.name}-indexed-modules" {
+    nativeBuildInputs = [ pkgs.kmod ];
+  } ''
+    mkdir -p "$out/lib"
+    cp -a --reflink=auto "${kernel}/lib/modules" "$out/lib/"
+    chmod -R u+w "$out/lib/modules"
+    depmod -b "$out" "${kernel.modDirVersion}"
+  '';
+
+  kernelWithIndexedModules = kernel // {
+    modules = indexedKernelModules;
+  };
+in
 {
   imports = [
     ./kernel-config.nix
@@ -21,8 +41,29 @@
   };
 
   mobile.boot.stage-1 = {
-    kernel.package = pkgs.callPackage ./kernel { };
+    kernel = {
+      package = kernelWithIndexedModules;
+
+      # The pmaports kernel configuration builds USB gadget support as
+      # modules.  Stage 1 must therefore carry its requested module closure;
+      # otherwise it gets an empty /lib/modules and cannot create the USB
+      # ConfigFS gadget used for recovery, installation, and RNDIS access.
+      modular = true;
+    };
   };
+
+  # NixOS' stage 2 obtains its module tree from the kernel derivation's
+  # "modules" output, not from the passthru attribute consumed above by
+  # Mobile NixOS.  The pmaports kernel has a single output, so point stage 2
+  # at the indexed copy explicitly.  Without this, udev cannot resolve any
+  # modalias: Wi-Fi stays absent and rockchip-isp1 never initializes DSI1 as
+  # the camera PHY, leaving the Rockchip DRM aggregate device incomplete.
+  system.modulesTree = lib.mkForce [ indexedKernelModules ];
+
+  # The second DSI controller doubles as a camera PHY.  Rockchip DRM waits for
+  # it as a component, so make its ISP consumer deterministic instead of
+  # depending on udev cold-plug timing before Phoc starts.
+  boot.kernelModules = [ "rockchip-isp1" ];
 
   # The U-Boot filesystem contains the kernel and DTBs twice: once for normal
   # boot and once for recovery.  Linux 7.2's DTB set no longer fits in the

@@ -7,6 +7,7 @@ let
   headlessDiagnostic = false;
 
   powerButtonPackage = pkgs.callPackage ./pkgs/pinephone-power-button { };
+  chatgptDesktop = pkgs.callPackage ./pkgs/chatgpt-desktop { };
 
   renurdHostApp =
     (builtins.getFlake (toString ../renurd)).apps.${pkgs.stdenv.hostPlatform.system}.host;
@@ -335,6 +336,30 @@ in
     };
   };
 
+  # Give a hot-plugged USB-C DisplayPort monitor the same logical origin as
+  # the phone panel.  Phoc otherwise appends it to the right, which leaves the
+  # external screen showing only the blue background until a window is moved
+  # there.  Keeping DSI-1 enabled provides a local recovery display, while the
+  # overlapping layout makes the focused phone window visible immediately and
+  # still allows Super+Shift+Right to move it fully onto the external output.
+  services.xserver.desktopManager.phosh.phocConfig = lib.mkForce ''
+    [core]
+    xwayland = false
+
+    [output:DSI-1]
+    scale = 2
+    x = 0
+    y = 0
+
+    [output:DP-1]
+    scale = 1
+    x = 0
+    y = 0
+
+    [cursor]
+    theme = default
+  '';
+
   # The direct system service reliably boots, but seatd's VT acquisition does
   # not tell logind that the PAM-created Wayland session is foreground. Phosh's
   # brightness slider then receives login1.NotYourDevice. Activate the already
@@ -480,6 +505,12 @@ in
           "sm/puri/phoc/application/org.chromium.Chromium" = {
             scale-to-fit = true;
           };
+          "sm/puri/phoc/application/chatgpt" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/ChatGPT" = {
+            scale-to-fit = true;
+          };
           "sm/puri/phoc/application/pavucontrol" = {
             scale-to-fit = true;
           };
@@ -538,6 +569,8 @@ in
     scaleToFitUtil
     torchUtil
     flashlightApp
+    chatgptDesktop
+    codex
     chatty
     dnsmasq
     iptables
@@ -952,7 +985,10 @@ in
   mobile.quirks.wifi.disableMacAddressRandomization = true;
 
   # chatty (SMS client) depends on olm for E2E encryption support
-  nixpkgs.config.permittedInsecurePackages = [ "olm-3.2.16" ];
+  nixpkgs.config = {
+    allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "chatgpt" ];
+    permittedInsecurePackages = [ "olm-3.2.16" ];
+  };
 
   # Silence non-critical kernel warning log spam on tty1 screen
   boot.consoleLogLevel = 3;
