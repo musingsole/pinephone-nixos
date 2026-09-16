@@ -1,0 +1,366 @@
+diff -ruN -x build -x .gradle -x .git a/libpebble3d/mobileapp/blobannotations/build.gradle.kts b/libpebble3d/mobileapp/blobannotations/build.gradle.kts
+--- a/libpebble3d/mobileapp/blobannotations/build.gradle.kts	2026-09-16 07:12:39.809228678 +0000
++++ b/libpebble3d/mobileapp/blobannotations/build.gradle.kts	2026-09-16 07:12:39.917879589 +0000
+@@ -7,53 +7,10 @@
+ 
+ plugins {
+     alias(libs.plugins.kotlin.multiplatform)
+-    alias(libs.plugins.android.library)
+-}
+-
+-android {
+-    namespace = "coredevices.blobannotations"
+-    compileSdk = libs.versions.android.compileSdk.get().toInt()
+-    defaultConfig {
+-        minSdk = 26
+-        lint.targetSdk = compileSdk
+-    }
+-
+-    compileOptions {
+-        sourceCompatibility = JavaVersion.valueOf("VERSION_${libs.versions.jvm.toolchain.get()}")
+-        targetCompatibility = JavaVersion.valueOf("VERSION_${libs.versions.jvm.toolchain.get()}")
+-    }
+-
+-    kotlin {
+-        jvmToolchain(libs.versions.jvm.toolchain.get().toInt())
+-    }
+ }
+ 
+ kotlin {
+-    androidTarget {
+-        publishLibraryVariants("release", "debug")
+-    }
+-
+     jvm()
+-
+-    val xcfName = "libpebble-annotations"
+-
+-    iosX64 {
+-        binaries.framework {
+-            baseName = xcfName
+-        }
+-    }
+-
+-    iosArm64 {
+-        binaries.framework {
+-            baseName = xcfName
+-        }
+-    }
+-
+-    iosSimulatorArm64 {
+-        binaries.framework {
+-            baseName = xcfName
+-        }
+-    }
+     sourceSets {
+         commonMain {
+             dependencies {
+@@ -65,12 +22,6 @@
+                 // Include testing dependencies such as junit here.
+             }
+         }
+-        androidMain {
+-
+-        }
+-        iosMain {
+-
+-        }
+         jvmMain {
+ 
+         }
+diff -ruN -x build -x .gradle -x .git a/libpebble3d/mobileapp/libpebble3/build.gradle.kts b/libpebble3d/mobileapp/libpebble3/build.gradle.kts
+--- a/libpebble3d/mobileapp/libpebble3/build.gradle.kts	2026-09-16 07:12:39.863603698 +0000
++++ b/libpebble3d/mobileapp/libpebble3/build.gradle.kts	2026-09-16 07:12:39.990678392 +0000
+@@ -1,11 +1,7 @@
+-import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSetTree
+-import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
+-
+ plugins {
+     alias(libs.plugins.kotlin.multiplatform)
+     `maven-publish`
+     alias(libs.plugins.kotlin.serialization)
+-    alias(libs.plugins.android.library)
+     alias(libs.plugins.ksp)
+     alias(libs.plugins.room)
+     alias(libs.plugins.kotlinx.atomicfu)
+@@ -30,39 +26,6 @@
+     schemaDirectory("schema")
+ }
+ 
+-android {
+-    compileSdk = libs.versions.android.compileSdk.get().toInt()
+-    namespace = "io.rebble.libpebblecommon"
+-    defaultConfig {
+-        minSdk = 26
+-        lint.targetSdk = compileSdk
+-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+-    }
+-
+-    compileOptions {
+-        sourceCompatibility = JavaVersion.valueOf("VERSION_${libs.versions.jvm.toolchain.get()}")
+-        targetCompatibility = JavaVersion.valueOf("VERSION_${libs.versions.jvm.toolchain.get()}")
+-    }
+-
+-    kotlin {
+-        jvmToolchain(libs.versions.jvm.toolchain.get().toInt())
+-    }
+-
+-    buildTypes {
+-        release {
+-            consumerProguardFiles("consumer-rules.pro")
+-        }
+-    }
+-}
+-
+-tasks.register("buildFrameworkLibPebbleSwift", BuildSwiftFramework::class) {
+-    group = "build"
+-    description = "Builds the Swift framework for libpebble-swift"
+-}
+-
+-// Non-mac machines cannot build iOS targets, so disable them
+-val enableIosTarget = System.getProperty("os.name").contains("mac", ignoreCase = true)
+-
+ kotlin {
+     targets.configureEach {
+         compilations.configureEach {
+@@ -74,63 +37,10 @@
+         }
+     }
+ 
+-    androidTarget {
+-        publishLibraryVariants("release", "debug")
+-        instrumentedTestVariant {
+-            sourceSetTree.set(KotlinSourceSetTree.test)
+-        }
+-    }
+-
+     // Generic-Linux library target. The daemon entrypoint (fun main) and its dist packaging live
+     // in the :libpebble3d-sailfish module.
+     jvm()
+ 
+-    val xcodeExists by lazy { // Define xcodeExists and xcodeDir here to be accessible by iOS targets
+-        project.providers.exec {
+-            isIgnoreExitValue = true
+-            commandLine("which", "xcode-select")
+-        }.result.get().exitValue == 0
+-    }
+-    val xcodeDir by lazy {
+-        if (xcodeExists) {
+-            project.providers.exec {
+-                commandLine("xcode-select", "-p")
+-            }.standardOutput.asText.get().trim()
+-        } else {
+-            ""
+-        }
+-    }
+-
+-    listOf(
+-        iosX64(),
+-        iosArm64(),
+-        iosSimulatorArm64()
+-    ).forEach { target ->
+-        if (enableIosTarget) {
+-            val osName = when (target.name) {
+-                "iosX64" -> "iphonesimulator"
+-                "iosArm64" -> "iphoneos"
+-                "iosSimulatorArm64" -> "iphonesimulator"
+-                else -> throw IllegalStateException("Unknown target: ${target.name}")
+-            }
+-            val dir = tasks.getByName("buildFrameworkLibPebbleSwift").outputs.files.singleFile.resolve(osName)
+-            target.binaries.framework {
+-                baseName = "libpebble3"
+-            }
+-            target.compilations.getByName("main") {
+-                val libPebbleSwift by cinterops.creating {
+-                    compilerOpts("-framework", "LibPebbleSwift", "-F" + dir.absolutePath)
+-                }
+-            }
+-            target.binaries.all {
+-                linkerOpts("-framework", "LibPebbleSwift", "-F" + dir.absolutePath)
+-                if (xcodeExists) {
+-                    linkerOpts("-L$xcodeDir/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$osName")
+-                }
+-            }
+-        }
+-    }
+-
+     sourceSets {
+         all {
+             languageSettings {
+@@ -149,8 +59,7 @@
+         }
+         commonMain {
+             kotlin {
+-                // Include ksp-generated common code (from our :blobdgen processor)
+-                srcDir("build/generated/ksp/metadata/commonMain/kotlin")
++                srcDir("build/generated/ksp/jvm/jvmMain/kotlin")
+             }
+         }
+         commonMain.dependencies {
+@@ -183,16 +92,6 @@
+             implementation(libs.coroutines.test)
+         }
+ 
+-        androidMain.dependencies {
+-            implementation(libs.androidx.core.ktx)
+-            implementation(libs.pebblekit)
+-        }
+-
+-        iosMain.dependencies {
+-            implementation(libs.ktor.client.darwin)
+-            implementation(libs.ktor.websockets)
+-        }
+-
+         jvmMain.dependencies {
+             // Linux desktop GATT server + pairing/adapter state over BlueZ D-Bus.
+             // (Kable's JVM/btleplug backend for the central role comes transitively via libs.kable.)
+@@ -221,87 +120,44 @@
+             implementation(libs.ktor.client.okhttp)
+         }
+ 
+-        androidInstrumentedTest.dependencies {
+-            implementation(libs.androidx.test.runner)
+-            implementation(libs.androidx.test.rules)
+-            implementation(libs.androidx.monitor)
+-        }
+-
+-        getByName("androidUnitTest").dependencies {
+-            implementation(libs.kotlin.test)
+-            implementation(libs.kotlin.test.junit)
+-            implementation(libs.coroutines.test)
+-        }
+     }
+ }
+ 
+-
+-// Otherwise it doesn't trigger our blobdbgen processor when compiling code
+-// https://github.com/google/ksp/issues/567
+-tasks.withType<KotlinCompilationTask<*>>().all {
+-    if (name != "kspCommonMainKotlinMetadata") {
+-        dependsOn("kspCommonMainKotlinMetadata")
+-    }
+-}
+ afterEvaluate {
+-    tasks.named("kspKotlinJvm") {
+-        dependsOn("kspCommonMainKotlinMetadata")
+-    }
+-    // Room's generated jvm actual for DatabaseConstructor fails expect/actual matching
+-    // (identical android codegen compiles fine — KSP/K2 quirk). Room on JVM falls back to
+-    // reflectively instantiating Database_Impl, so the constructor object isn't needed.
++    val kspKotlinDir = file("build/generated/ksp/jvm/jvmMain/kotlin")
++    val kspJavaDir = file("build/generated/ksp/jvm/jvmMain/java")
++    kotlin.sourceSets.getByName("jvmMain").kotlin.setSrcDirs(
++        kotlin.sourceSets.getByName("jvmMain").kotlin.srcDirs.filter {
++            it != kspKotlinDir && it != kspJavaDir
++        }
++    )
+     tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlinJvm") {
++        dependsOn("kspKotlinJvm")
+         exclude("**/DatabaseConstructor.kt")
+     }
+-    tasks.named("kspDebugKotlinAndroid") {
+-        dependsOn("kspCommonMainKotlinMetadata")
+-    }
+-    tasks.named("kspReleaseKotlinAndroid") {
+-        dependsOn("kspCommonMainKotlinMetadata")
+-    }
+-
+-    if (enableIosTarget) {
+-        tasks.named("kspKotlinIosArm64") {
+-            dependsOn("kspCommonMainKotlinMetadata")
+-        }
+-        tasks.named("kspKotlinIosX64") {
+-            dependsOn("kspCommonMainKotlinMetadata")
+-        }
+-        tasks.named("kspKotlinIosSimulatorArm64") {
+-            dependsOn("kspCommonMainKotlinMetadata")
+-        }
+-        tasks.named("cinteropLibPebbleSwiftIosArm64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-        tasks.named("cinteropLibPebbleSwiftIosX64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-        tasks.named("cinteropLibPebbleSwiftIosSimulatorArm64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-        tasks.named("compileKotlinIosArm64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-        tasks.named("compileKotlinIosX64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-        tasks.named("compileKotlinIosSimulatorArm64") {
+-            dependsOn("buildFrameworkLibPebbleSwift")
+-        }
+-    }
+ }
+ 
+ dependencies {
+-//    add("kspCommonMainMetadata", libs.room.compiler)
+     // Room codegen for the JVM/Linux target — without this Database_Impl doesn't exist.
+     add("kspJvm", libs.room.compiler)
+-    add("kspCommonMainMetadata", project(":blobdbgen"))
+-    add("kspAndroid", libs.room.compiler)
++    add("kspJvm", project(":blobdbgen"))
++}
+ 
+-    if (enableIosTarget) {
+-        add("kspIosX64", libs.room.compiler)
+-        add("kspIosArm64", libs.room.compiler)
+-        add("kspIosSimulatorArm64", libs.room.compiler)
++// Nixpkgs' generic dependency task cannot see configurations that KSP and
++// Kotlin Multiplatform create lazily. Resolve every JVM/KSP classpath in one
++// explicit task while generating the offline dependency lock.
++tasks.register("nixResolveJvmDependencies") {
++    // KSP creates its compiler classpath as a detached configuration only
++    // after Gradle asks for kspKotlinJvm's task dependencies. Force that
++    // lazy configuration into existence while gradle.fetchDeps is recording.
++    dependsOn("kspKotlinJvm")
++    doLast {
++        configurations
++            .filter { it.isCanBeResolved && (it.name.contains("jvm", ignoreCase = true) || it.name.contains("ksp", ignoreCase = true)) }
++            .forEach {
++                logger.lifecycle("Resolving ${it.name}")
++                it.resolve()
++            }
+     }
+ }
+ 
+diff -ruN -x build -x .gradle -x .git a/libpebble3d/mobileapp/settings.gradle.kts b/libpebble3d/mobileapp/settings.gradle.kts
+--- a/libpebble3d/mobileapp/settings.gradle.kts	2026-09-16 07:12:39.898896784 +0000
++++ b/libpebble3d/mobileapp/settings.gradle.kts	2026-09-16 07:12:40.079886019 +0000
+@@ -27,13 +27,3 @@
+ include(":libpebble3")
+ include(":blobdbgen")
+ include(":blobannotations")
+-include(":composeApp")
+-include(":pebble")
+-include(":util")
+-include(":mcp")
+-include(":index-ai")
+-include(":resampler")
+-include(":cactus")
+-include(":libindex")
+-include(":experimental")
+-include(":krisp-stubs")
+
+diff -ruN -x build -x .gradle -x .git a/libpebble3d/mobileapp/libpebble3/src/jvmMain/kotlin/io/rebble/libpebblecommon/connection/bt/ble/transport/impl/BluezGattClient.kt b/libpebble3d/mobileapp/libpebble3/src/jvmMain/kotlin/io/rebble/libpebblecommon/connection/bt/ble/transport/impl/BluezGattClient.kt
+--- a/libpebble3d/mobileapp/libpebble3/src/jvmMain/kotlin/io/rebble/libpebblecommon/connection/bt/ble/transport/impl/BluezGattClient.kt	2026-09-16 07:12:39.000000000 +0000
++++ b/libpebble3d/mobileapp/libpebble3/src/jvmMain/kotlin/io/rebble/libpebblecommon/connection/bt/ble/transport/impl/BluezGattClient.kt	2026-09-16 07:12:40.000000000 +0000
+@@ -201,11 +201,13 @@
+         val rawAdapter = dm.dbusConnection.getRemoteObject(
+             "org.bluez", adapter.dbusPath, Adapter1::class.java,
+         )
++        val firstByte = identifier.asString.substringBefore(':').toIntOrNull(16) ?: 0
++        val addressType = if ((firstByte and 0xC0) == 0xC0) "random" else "public"
+         purgeStaleDevice(rawAdapter, dev)
+         return try {
+             rawAdapter.ConnectDevice(
+                 mapOf(
+                     "Address" to Variant(identifier.asString),
+-                    "AddressType" to Variant("public"),
++                    "AddressType" to Variant(addressType),
+                 )
+             )
+             true

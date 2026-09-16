@@ -11,8 +11,9 @@ request_timeout_seconds = 90
 image_detail = "high"
 
 [tablet_control]
-enabled = false
+enabled = true
 api_token = "replace-with-a-long-random-control-token"
 registry_path = "nurd-tablets.json"
 ssh_user = "root"
+ssh_identity_file = "/var/lib/renurd-host/id_ed25519"
 ssh_connect_timeout_seconds = 8

@@ -8,11 +8,14 @@ let
 
   powerButtonPackage = pkgs.callPackage ./pkgs/pinephone-power-button { };
   chatgptDesktop = pkgs.callPackage ./pkgs/chatgpt-desktop { };
+  libpebble3d = pkgs.callPackage ./pkgs/libpebble3d/package.nix { };
 
-  renurdHostApp =
-    (builtins.getFlake (toString ../renurd)).apps.${pkgs.stdenv.hostPlatform.system}.host;
+  renurdFlake =
+    builtins.getFlake "git+ssh://git@github.com/musingsole/renurd.git";
+  renurdPackage =
+    renurdFlake.packages.${pkgs.stdenv.hostPlatform.system}.nurd-host;
   renurd-host = pkgs.writeShellScriptBin "renurd-host" ''
-    exec ${renurdHostApp.program} "$@"
+    exec ${renurdPackage}/bin/nurd-host "$@"
   '';
 
   handballNgrokApp =
@@ -564,6 +567,9 @@ in
     pulseaudio
     pavucontrol
     htop
+    vim
+    git
+    tmux
     audioSwitchUtil
     chromiumMobile
     scaleToFitUtil
@@ -574,8 +580,25 @@ in
     chatty
     dnsmasq
     iptables
+    libpebble3d
+    renurdPackage
     renurd-host
   ];
+
+  # Native Pebble 2 Duo companion. It owns org.rockwork on the login
+  # session bus and provides the PPoGATT pairing path used by
+  # nurd-pebble-pair.
+  systemd.user.services.libpebble3d = {
+    description = "Pebble daemon (libpebble3 native image)";
+    wantedBy = [ "default.target" ];
+    after = [ "dbus.socket" ];
+    requires = [ "dbus.socket" ];
+    serviceConfig = {
+      ExecStart = "${libpebble3d}/bin/libpebble3d";
+      Restart = "always";
+      RestartSec = 5;
+    };
+  };
 
   # ---------------------------------------------------------------------------
   # Megapixels Camera Pipeline Configuration for PinePhone Pro
@@ -754,6 +777,7 @@ in
     description = "Initialize PinePhone Pro Bluetooth & RFKill Permissions";
     wantedBy = [ "multi-user.target" ];
     after = [ "bluetooth.service" ];
+    path = with pkgs; [ bluez gawk gnugrep util-linux systemd coreutils ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
