@@ -21,6 +21,34 @@ let
   handballNgrokApp =
     (builtins.getFlake (toString ../handball)).apps.${pkgs.stdenv.hostPlatform.system}.handball-ngrok;
 
+  netsurfMobile = pkgs.runCommand "netsurf-mobile" {
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+  } ''
+    mkdir -p $out/bin $out/share/applications $out/share/pixmaps
+
+    if [ -f "${pkgs.netsurf-browser}/share/netsurf.png" ]; then
+      cp ${pkgs.netsurf-browser}/share/netsurf.png $out/share/pixmaps/netsurf.png
+    fi
+
+    makeWrapper ${pkgs.netsurf-browser}/bin/netsurf-gtk3 $out/bin/netsurf
+
+    cat > $out/share/applications/netsurf.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=NetSurf Browser
+GenericName=Web Browser
+Comment=Lightweight Web Browser
+Exec=netsurf %U
+Icon=netsurf
+Terminal=false
+StartupWMClass=netsurf-gtk3
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+X-Purism-FormFactor=Workstation;Mobile;
+EOF
+  '';
+
   chromiumMobile = pkgs.runCommand "chromium-mobile" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
   } ''
@@ -265,6 +293,7 @@ in
   imports = [
     ./examples/phosh/phosh.nix
     ./power-management.nix
+    ./pebble-management.nix
   ];
 
   # Restore battery telemetry and low-charge protection now that the stable
@@ -274,6 +303,11 @@ in
   pinephone.power = {
     enable = true;
     manageFrequencies = false;
+  };
+
+  # Pebble Smartwatch management portal & sideloading daemon (http://127.0.0.1:9096)
+  pinephone.pebble = {
+    enable = true;
   };
 
   # ---------------------------------------------------------------------------
@@ -374,9 +408,16 @@ in
     after = [ "phosh.service" ];
     serviceConfig = {
       Type = "oneshot";
-      ExecStart = "${pkgs.systemd}/bin/loginctl activate 1";
+      ExecStart = pkgs.writeShellScript "activate-phosh-session" ''
+        SESSION_ID=$(${pkgs.systemd}/bin/loginctl list-sessions --no-legend | ${pkgs.gawk}/bin/awk '($4 == "seat0" || $7 == "tty1") && $3 == "${defaultUser}" { print $1; exit }')
+        if [ -n "$SESSION_ID" ]; then
+          ${pkgs.systemd}/bin/loginctl activate "$SESSION_ID"
+        else
+          ${pkgs.systemd}/bin/loginctl activate 1
+        fi
+      '';
       Restart = "on-failure";
-      RestartSec = 0.2;
+      RestartSec = 0.5;
     };
   };
 
@@ -523,6 +564,12 @@ in
           "sm/puri/phoc/application/gnome-control-center" = {
             scale-to-fit = true;
           };
+          "sm/puri/phoc/application/netsurf" = {
+            scale-to-fit = true;
+          };
+          "sm/puri/phoc/application/netsurf-gtk3" = {
+            scale-to-fit = true;
+          };
           "mobi/phosh/osk" = {
             enabled = true;
           };
@@ -530,6 +577,24 @@ in
       }
     ];
   };
+
+  # ---------------------------------------------------------------------------
+  # Default Applications (XDG MIME Defaults)
+  # ---------------------------------------------------------------------------
+  xdg.mime = {
+    enable = true;
+    defaultApplications = {
+      "text/html" = "netsurf.desktop";
+      "text/xml" = "netsurf.desktop";
+      "application/xhtml+xml" = "netsurf.desktop";
+      "application/x-mimearchive" = "netsurf.desktop";
+      "x-scheme-handler/http" = "netsurf.desktop";
+      "x-scheme-handler/https" = "netsurf.desktop";
+      "x-scheme-handler/about" = "netsurf.desktop";
+      "x-scheme-handler/unknown" = "netsurf.desktop";
+    };
+  };
+
   # ---------------------------------------------------------------------------
   # Sound & Audio (PipeWire, WirePlumber, ALSA & PulseAudio Compatibility)
   # ---------------------------------------------------------------------------
@@ -552,7 +617,6 @@ in
   services.pulseaudio.enable = false;
 
   environment.gnome.excludePackages = with pkgs; [
-    epiphany
   ];
 
   # This image does not manage a root Nix channel. Point legacy commands such
@@ -571,6 +635,8 @@ in
     git
     tmux
     audioSwitchUtil
+    epiphany
+    netsurfMobile
     chromiumMobile
     scaleToFitUtil
     torchUtil
@@ -885,7 +951,8 @@ in
   # Enable Bluetooth Blueman Manager and Modem (eg25-manager & calls) for PinePhone Pro
   services.blueman.enable = true;
 
-  services.eg25-manager.enable = true;
+  # Modem is managed natively by ModemManager via QMI; eg25-manager is disabled to prevent segfaults
+  services.eg25-manager.enable = false;
   programs.calls.enable = true;
   networking.modemmanager.enable = true;
 
@@ -1072,8 +1139,6 @@ in
 
       # Phosh bakes the absolute Phoc path into its session definition.
       phosh = super.phosh.override { phoc = final.phoc; };
-
-      epiphany = super.emptyDirectory;
     })
   ];
 }

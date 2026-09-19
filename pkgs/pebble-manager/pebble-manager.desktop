@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pebble Manager
+GenericName=Smartwatch Manager
+Comment=Manage apps, browse Rebble Store, and sideload watchfaces
+Exec=pebble-manager open
+Icon=preferences-system-bluetooth
+Terminal=false
+Categories=Utility;Settings;
+X-Purism-FormFactor=Workstation;Mobile;
